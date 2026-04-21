@@ -2,18 +2,21 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
 <title>Lewis's An-225 Adventure!</title>
 <style>
   body { margin: 0; background: #111; display: flex; flex-direction: column;
          align-items: center; justify-content: center; height: 100vh;
-         font-family: Arial, sans-serif; }
-  canvas { border: 3px solid #FFD700; border-radius: 6px; display: block; }
-  p { color: #aaa; margin: 8px 0 0; font-size: 13px; }
+         overflow: hidden; font-family: Arial, sans-serif; }
+  canvas { border: 3px solid #FFD700; border-radius: 6px; display: block;
+           touch-action: none; }
+  p { color: #aaa; margin: 6px 0 0; font-size: 12px; text-align: center; }
 </style>
 </head>
 <body>
 <canvas id="c" width="800" height="450"></canvas>
-<p>SPACE / UP = fly up &nbsp;|&nbsp; DOWN = dive &nbsp;|&nbsp; R = restart</p>
+<p>⌨️ SPACE / ↑ = up &nbsp;|&nbsp; ↓ = down &nbsp;|&nbsp; R = restart &nbsp;&nbsp;
+   📱 Tap top half = up &nbsp;|&nbsp; Tap bottom = down</p>
 
 <script>
 const W = 800, H = 450;
@@ -285,7 +288,7 @@ function drawStartScreen() {
   ctx.fillStyle = '#FFD700'; ctx.font = '13px Arial';
   ctx.fillText("Avoid birds & storms!   Collect cargo crates for +50 pts!", W/2, 196);
   ctx.fillStyle = 'white'; ctx.font = 'italic 14px Arial';
-  ctx.fillText("Press SPACE or ↑ to start!", W/2, 224);
+  ctx.fillText("Press SPACE / ↑  or  TAP to start!", W/2, 224);
   ctx.textAlign = 'left';
 }
 
@@ -303,13 +306,33 @@ function drawGameOver() {
   ctx.fillStyle = '#aadaff'; ctx.font = '17px Arial';
   ctx.fillText('Best: ' + highScore, cx, cy+20);
   ctx.fillStyle = 'white'; ctx.font = '15px Arial';
-  ctx.fillText('Press  R  to fly again!', cx, cy+58);
+  ctx.fillText('Press R  or  TAP to fly again!', cx, cy+58);
   ctx.fillStyle = '#FFD700'; ctx.font = 'italic 14px Arial';
   ctx.fillText('Amazing flying, Lewis!', cx, cy+90);
   ctx.textAlign = 'left';
 }
 
 function rand(a, b) { return Math.floor(Math.random() * (b - a + 1)) + a; }
+
+// ── responsive scaling ─────────────────────────────────────────────────────
+function resizeCanvas() {
+  const hintH = 36;
+  const scale = Math.min(window.innerWidth / W, (window.innerHeight - hintH) / H);
+  canvas.style.width  = Math.round(W * scale) + 'px';
+  canvas.style.height = Math.round(H * scale) + 'px';
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// ── touch controls ──────────────────────────────────────────────────────────
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  const r = canvas.getBoundingClientRect();
+  const ty = (t.clientY - r.top) * H / r.height;   // canvas-space Y
+  if (state === 'start' || state === 'gameover') { state = 'playing'; reset(); }
+  else if (state === 'playing') { velY = ty > H * 0.62 ? 5 : -7.5; }
+}, { passive: false });
 
 reset();
 loop();
