@@ -65,13 +65,13 @@ function update() {
   if (frame % 70  === 0) clouds.push({ x: W + 80, y: rand(15, H/2 - 30), w: rand(50, 110) });
 
   // physics
-  velY += 0.36;
-  velY = Math.min(velY, 9);
+  velY += 0.18;
+  velY = Math.min(velY, 4.5);
   planeY += velY;
   // ceiling: keep wing tips on screen (wing extends 52px above centre)
   if (planeY < 58)      { planeY = 58; velY = 0; }
   // ground: gear wheels (42px below centre) hit the grass
-  if (planeY > H - 82)  { endGame(); return; }
+  if (planeY > H - 82)  { planeY = H - 82; velY = 0; }
 
   obstacles.forEach(o => o.x -= speed);
   cargo.forEach(c     => c.x -= speed * 0.85);
@@ -125,27 +125,22 @@ function draw() {
   if (state === 'gameover') drawGameOver();
 }
 
-// ── An-225, facing RIGHT, with 6 engines (3 pairs) + landing gear ──────────
+// ── An-225, facing RIGHT — cartoon style matching the character art ──────────
 function drawPlane(x, y) {
-  // x = left anchor, y = fuselage centre.  Nose → right.  Total width ~207px.
+  // x = left anchor, y = fuselage centre.  Nose → right.  Total width ~210px.
 
-  // ① PYLONS — drawn first so wing+fuselage cover their middle sections
+  // ① PYLONS — drawn first so wing+fuselage cover their middles
   ctx.strokeStyle = '#888'; ctx.lineWidth = 2.5;
-  [ [x+91, y-14], [x+74, y-19], [x+57, y-36] ].forEach(([px, top]) => {
+  [[x+91, y-14], [x+74, y-19], [x+57, y-36]].forEach(([px, top]) => {
     ctx.beginPath(); ctx.moveTo(px, top); ctx.lineTo(px, y+18); ctx.stroke();
   });
 
   // ② LANDING GEAR
   ctx.strokeStyle = '#666'; ctx.lineWidth = 2.5;
-  // — nose gear strut + axle
   ctx.beginPath(); ctx.moveTo(x+176, y+13); ctx.lineTo(x+174, y+30); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(x+167, y+30); ctx.lineTo(x+181, y+30); ctx.stroke();
   [x+166, x+180].forEach(wx => wheel(wx, y+36, 5));
-
-  // — 3 main-gear bogies (each with 3 wheels → 9 visible main wheels)
-  [ [x+88, [x+81, x+88, x+95]],
-    [x+71, [x+64, x+71, x+78]],
-    [x+54, [x+47, x+54, x+61]] ].forEach(([sx, ws]) => {
+  [[x+88, [x+81, x+88, x+95]], [x+71, [x+64, x+71, x+78]], [x+54, [x+47, x+54, x+61]]].forEach(([sx, ws]) => {
     ctx.strokeStyle = '#666'; ctx.lineWidth = 2.5;
     ctx.beginPath(); ctx.moveTo(sx, y+13); ctx.lineTo(sx, y+29); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(sx-10, y+29); ctx.lineTo(sx+10, y+29); ctx.stroke();
@@ -155,81 +150,122 @@ function drawPlane(x, y) {
   // ③ HORIZONTAL STABILISER
   ctx.fillStyle = '#ccc'; ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1.5;
   ctx.beginPath();
-  ctx.moveTo(x+14, y-8); ctx.lineTo(x-8, y-22);
-  ctx.lineTo(x-8, y+18); ctx.lineTo(x+14, y+4);
+  ctx.moveTo(x+14, y-8); ctx.lineTo(x-8, y-22); ctx.lineTo(x-8, y+18); ctx.lineTo(x+14, y+4);
   ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.save();
+  ctx.beginPath(); ctx.moveTo(x+14, y-8); ctx.lineTo(x-8, y-22); ctx.lineTo(x-8, y+18); ctx.lineTo(x+14, y+4); ctx.closePath(); ctx.clip();
+  ctx.fillStyle = '#0057B7'; ctx.fillRect(x-8, y-22, 25, 23);
+  ctx.fillStyle = '#FFD700'; ctx.fillRect(x-8, y-4, 25, 5);
+  ctx.restore();
 
-  // ④ TWIN VERTICAL TAIL FINS  (H-tail: two fins, near + far)
+  // ④ TWIN VERTICAL TAIL FINS (with Ukrainian flag colours)
   ctx.fillStyle = '#ddd'; ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1.5;
   ctx.beginPath();
-  ctx.moveTo(x+8, y-13); ctx.lineTo(x+22, y-52);
-  ctx.lineTo(x+35, y-52); ctx.lineTo(x+24, y-13);
+  ctx.moveTo(x+8, y-13); ctx.lineTo(x+22, y-52); ctx.lineTo(x+35, y-52); ctx.lineTo(x+24, y-13);
   ctx.closePath(); ctx.fill(); ctx.stroke();
-  ctx.fillStyle = '#c5c5c5';
-  ctx.beginPath();
-  ctx.moveTo(x+21, y-13); ctx.lineTo(x+35, y-52);
-  ctx.lineTo(x+48, y-52); ctx.lineTo(x+37, y-13);
-  ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.save();
+  ctx.beginPath(); ctx.moveTo(x+8, y-13); ctx.lineTo(x+22, y-52); ctx.lineTo(x+35, y-52); ctx.lineTo(x+24, y-13); ctx.closePath(); ctx.clip();
+  ctx.fillStyle = '#0057B7'; ctx.fillRect(x+8, y-52, 30, 33);
+  ctx.fillStyle = '#FFD700'; ctx.fillRect(x+8, y-19, 30, 8);
+  ctx.restore();
 
-  // ⑤ FUSELAGE  (wide ellipse + pointed nose bezier)
-  ctx.fillStyle = 'white'; ctx.strokeStyle = '#999'; ctx.lineWidth = 1.5;
+  ctx.fillStyle = '#c5c5c5'; ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1.5;
   ctx.beginPath();
-  ctx.ellipse(x+93, y, 93, 14, 0, 0, Math.PI*2);
-  ctx.fill(); ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(x+183, y-11);
-  ctx.bezierCurveTo(x+197, y-6, x+207, y-1, x+207, y+1);
-  ctx.bezierCurveTo(x+207, y+3, x+197, y+9, x+183, y+11);
+  ctx.moveTo(x+21, y-13); ctx.lineTo(x+35, y-52); ctx.lineTo(x+48, y-52); ctx.lineTo(x+37, y-13);
   ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.save();
+  ctx.beginPath(); ctx.moveTo(x+21, y-13); ctx.lineTo(x+35, y-52); ctx.lineTo(x+48, y-52); ctx.lineTo(x+37, y-13); ctx.closePath(); ctx.clip();
+  ctx.fillStyle = '#0057B7'; ctx.fillRect(x+21, y-52, 30, 33);
+  ctx.fillStyle = '#FFD700'; ctx.fillRect(x+21, y-19, 30, 8);
+  ctx.restore();
 
-  // ⑥ WING  (high-mounted, swept back slightly)
+  // ⑤ WING (with Ukrainian tip stripe)
   ctx.fillStyle = '#e0e0e0'; ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1.5;
   ctx.beginPath();
-  ctx.moveTo(x+106, y-13);   // root front
-  ctx.lineTo(x+60,  y-52);   // tip front
-  ctx.lineTo(x+42,  y-52);   // tip back
-  ctx.lineTo(x+80,  y-13);   // root back
+  ctx.moveTo(x+106, y-13); ctx.lineTo(x+60, y-52); ctx.lineTo(x+42, y-52); ctx.lineTo(x+80, y-13);
   ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.save();
+  ctx.beginPath(); ctx.moveTo(x+106, y-13); ctx.lineTo(x+60, y-52); ctx.lineTo(x+42, y-52); ctx.lineTo(x+80, y-13); ctx.closePath(); ctx.clip();
+  ctx.fillStyle = '#0057B7'; ctx.fillRect(x+42, y-52, 68, 8);
+  ctx.fillStyle = '#FFD700'; ctx.fillRect(x+42, y-44, 68, 5);
+  ctx.restore();
   ctx.strokeStyle = '#c8c8c8'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(x+106, y-13); ctx.lineTo(x+60, y-52); ctx.stroke(); // LE highlight
+  ctx.beginPath(); ctx.moveTo(x+106, y-13); ctx.lineTo(x+60, y-52); ctx.stroke();
 
-  // ⑦ 6 ENGINES — 3 groups × (far engine + near engine) = 6 total
+  // ⑥ FUSELAGE — white top, blue bottom, yellow waist stripe
+  ctx.fillStyle = 'white'; ctx.strokeStyle = '#aaa'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.ellipse(x+93, y, 95, 17, 0, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+  // Nose cap
+  ctx.fillStyle = 'white';
+  ctx.beginPath();
+  ctx.moveTo(x+186, y-13); ctx.bezierCurveTo(x+200, y-6, x+210, y, x+210, y);
+  ctx.bezierCurveTo(x+210, y, x+200, y+8, x+186, y+13); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(x+186, y-13); ctx.bezierCurveTo(x+200, y-6, x+210, y, x+210, y);
+  ctx.bezierCurveTo(x+210, y, x+200, y+8, x+186, y+13); ctx.closePath(); ctx.stroke();
+  // Blue bottom half (clipped to below centre line)
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, y+1, W, H); ctx.clip();
+  ctx.fillStyle = '#0057B7';
+  ctx.beginPath(); ctx.ellipse(x+93, y, 95, 17, 0, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(x+186, y-13); ctx.bezierCurveTo(x+200, y-6, x+210, y, x+210, y);
+  ctx.bezierCurveTo(x+210, y, x+200, y+8, x+186, y+13); ctx.closePath(); ctx.fill();
+  ctx.restore();
+  // Yellow waist stripe
+  ctx.fillStyle = '#FFD700'; ctx.fillRect(x-2, y-2, 215, 5);
+
+  // ⑦ 6 ENGINES — 3 groups × (far + near) = 6 total
   [x+91, x+74, x+57].forEach(ex => {
-    // far-side engine (lighter, slightly higher — depth cue)
     ctx.fillStyle = '#6a6a6a'; ctx.strokeStyle = '#444'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.ellipse(ex, y+19, 13, 5, 0, 0, Math.PI*2); ctx.fill(); ctx.stroke();
-    ctx.fillStyle = '#111';   // intake (right = front of engine)
+    ctx.fillStyle = '#111';
     ctx.beginPath(); ctx.ellipse(ex+13, y+19, 3.5, 5, 0, 0, Math.PI*2); ctx.fill();
-    ctx.fillStyle = '#aaa';   // exhaust nozzle (left = rear)
-    ctx.beginPath(); ctx.ellipse(ex-13, y+19, 2.5, 4,   0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#aaa';
+    ctx.beginPath(); ctx.ellipse(ex-13, y+19, 2.5, 4, 0, 0, Math.PI*2); ctx.fill();
 
-    // near-side engine (darker, slightly lower)
     ctx.fillStyle = '#505050'; ctx.strokeStyle = '#333'; ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.ellipse(ex, y+29, 15, 6.5, 0, 0, Math.PI*2); ctx.fill(); ctx.stroke();
-    ctx.fillStyle = '#0d0d0d'; // intake
+    ctx.fillStyle = '#0d0d0d';
     ctx.beginPath(); ctx.ellipse(ex+15, y+29, 4.5, 6.5, 0, 0, Math.PI*2); ctx.fill();
-    ctx.fillStyle = '#888';    // nozzle
-    ctx.beginPath(); ctx.ellipse(ex-15, y+29, 3, 5,    0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#888';
+    ctx.beginPath(); ctx.ellipse(ex-15, y+29, 3, 5, 0, 0, Math.PI*2); ctx.fill();
   });
 
-  // ⑧ UKRAINIAN FLAG STRIPE
-  ctx.fillStyle = '#0057B7'; ctx.fillRect(x+30, y-7, 130, 7);
-  ctx.fillStyle = '#FFD700'; ctx.fillRect(x+30, y,   130, 7);
+  // ⑧ CARTOON FACE — big eyes, smile and rosy cheeks on the nose
+  const [fx1, fx2, fy] = [x+152, x+170, y-5];
+  // Eye whites
+  ctx.fillStyle = 'white'; ctx.strokeStyle = '#333'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(fx1, fy, 9, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.arc(fx2, fy, 9, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+  // Iris
+  ctx.fillStyle = '#4488ee';
+  ctx.beginPath(); ctx.arc(fx1+1, fy, 6, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(fx2+1, fy, 6, 0, Math.PI*2); ctx.fill();
+  // Pupil
+  ctx.fillStyle = '#111';
+  ctx.beginPath(); ctx.arc(fx1+2, fy, 3.5, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(fx2+2, fy, 3.5, 0, Math.PI*2); ctx.fill();
+  // Shine
+  ctx.fillStyle = 'white';
+  ctx.beginPath(); ctx.arc(fx1, fy-2, 1.5, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(fx2, fy-2, 1.5, 0, Math.PI*2); ctx.fill();
+  // Eyebrows
+  ctx.strokeStyle = '#222'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(fx1, fy-9, 7, Math.PI*1.15, Math.PI*1.85); ctx.stroke();
+  ctx.beginPath(); ctx.arc(fx2, fy-9, 7, Math.PI*1.15, Math.PI*1.85); ctx.stroke();
+  // Smile
+  ctx.strokeStyle = '#cc2222'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(x+164, y+6, 7, 0.1, Math.PI-0.1); ctx.stroke();
+  // Rosy cheeks
+  ctx.fillStyle = 'rgba(255,100,120,0.4)';
+  ctx.beginPath(); ctx.ellipse(fx1-4, y+7, 7, 4, 0, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(fx2+5, y+7, 7, 4, 0, 0, Math.PI*2); ctx.fill();
 
-  // ⑨ COCKPIT WINDOWS
-  [x+170, x+184].forEach(wx => {
-    ctx.fillStyle = '#a8d8ff'; ctx.strokeStyle = '#888'; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.ellipse(wx, y-5, 5, 4, -0.2, 0, Math.PI*2); ctx.fill(); ctx.stroke();
-  });
-  [x+125, x+142, x+157].forEach(wx => {
-    ctx.fillStyle = '#c8eaff'; ctx.strokeStyle = '#999'; ctx.lineWidth = 0.8;
-    ctx.beginPath(); ctx.ellipse(wx, y-7, 4, 3, 0, 0, Math.PI*2); ctx.fill(); ctx.stroke();
-  });
-
-  // ⑩ AN-225 LABEL
-  ctx.fillStyle = '#003366'; ctx.font = 'bold 8px Arial';
-  ctx.textAlign = 'center';
-  ctx.fillText('AN-225', x+100, y+5);
+  // ⑨ AN-225 LABEL
+  ctx.fillStyle = '#003366'; ctx.font = 'bold 8px Arial'; ctx.textAlign = 'center';
+  ctx.fillText('AN-225', x+90, y+4);
   ctx.textAlign = 'left';
 }
 
