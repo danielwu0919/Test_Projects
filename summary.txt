@@ -1,0 +1,50 @@
+Lewis's An-225 Adventure — Project Summary
+===========================================
+
+What we built:
+A browser-based side-scrolling game for Lewis, featuring the Antonov An-225
+(the world's biggest cargo plane). No installs required — runs in any web browser.
+
+How to play:
+- SPACE or UP arrow = fly up
+- DOWN arrow = dive down
+- R = restart
+- On mobile: tap top half of screen = up, tap bottom half = down
+
+Game features:
+- The An-225 flies across the screen while gravity pulls it down
+- Avoid birds and storm clouds (they end the game)
+- Collect brown cargo crates for +50 bonus points each
+- Score increases every frame; speed increases every 400 frames (up to level 10)
+- High score is tracked between rounds
+- "Amazing flying, Lewis!" message on the game over screen
+
+The plane drawing includes:
+- Long white fuselage with a pointed nose (bezier curve)
+- Ukrainian flag stripe (blue + yellow)
+- High-mounted swept-back wing
+- 6 engines in 3 pairs hanging below the wing on pylons
+  (near-side engine darker, far-side engine lighter for depth)
+- Twin vertical H-tail fins
+- Horizontal stabiliser
+- Nose gear (2 wheels) + 3 main gear bogies (3 wheels each = 11 visible wheels total)
+- Cockpit windows near the nose
+
+Files:
+- index.html         — the game (mobile-ready, hosted on GitHub Pages)
+- lewis_an225_game.py — original Python version (does not run on macOS system Python)
+
+Why we switched from Python to HTML:
+The system Python 3.9 on macOS uses a deprecated version of Tk (the graphics
+library) that cannot draw anything on the canvas. Rewriting as an HTML file
+means it works instantly in any browser with no installation needed.
+
+Mobile support added:
+- <meta name="viewport"> tag so the page fits phone screens
+- JavaScript resizes the canvas to fill the screen on any device
+- Touch events: tap top = fly up, tap bottom = dive
+
+Hosting on GitHub Pages:
+1. Renamed the file to index.html and pushed it to GitHub
+2. Enabled GitHub Pages in repo Settings -> Pages -> Branch: main / root
+3. Live URL: https://danielwu0919.github.io/Test_Projects/
