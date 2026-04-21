@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Lewis's An-225 Adventure!</title>
+<style>
+  body { margin: 0; background: #111; display: flex; flex-direction: column;
+         align-items: center; justify-content: center; height: 100vh;
+         font-family: Arial, sans-serif; }
+  canvas { border: 3px solid #FFD700; border-radius: 6px; display: block; }
+  p { color: #aaa; margin: 8px 0 0; font-size: 13px; }
+</style>
+</head>
+<body>
+<canvas id="c" width="800" height="450"></canvas>
+<p>SPACE / UP = fly up &nbsp;|&nbsp; DOWN = dive &nbsp;|&nbsp; R = restart</p>
+
+<script>
+const W = 800, H = 450;
+const PLANE_X = 150;   // horizontal centre of plane (for collision)
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+// ── state ──────────────────────────────────────────────────────────────────
+let state = 'start';
+let planeY, velY, score, frame, speed;
+let obstacles, cargo, clouds;
+let highScore = 0;
+
+function reset() {
+  planeY = H / 2; velY = 0; score = 0; frame = 0; speed = 4;
+  obstacles = []; cargo = []; clouds = [];
+}
+
+// ── input ──────────────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (['Space','ArrowUp','KeyW'].includes(e.code)) {
+    if (state === 'start')    { state = 'playing'; reset(); }
+    else if (state === 'playing') velY = -7.5;
+  }
+  if (['ArrowDown','KeyS'].includes(e.code) && state === 'playing') velY = 5;
+  if (e.code === 'KeyR' && state === 'gameover') { state = 'playing'; reset(); }
+  e.preventDefault();
+});
+
+// ── game loop ──────────────────────────────────────────────────────────────
+function loop() {
+  requestAnimationFrame(loop);
+  if (state === 'playing') update();
+  draw();
+}
+
+function update() {
+  frame++; score++;
+  if (frame % 400 === 0) speed = Math.min(speed + 0.5, 13);
+
+  const interval = Math.max(32, 95 - Math.floor(score / 70));
+  if (frame % interval === 0) {
+    obstacles.push({ x: W + 10, y: rand(60, H - 90), kind: Math.random() < 0.25 ? 'storm' : 'bird' });
+  }
+  if (frame % 210 === 0) cargo.push({ x: W + 10, y: rand(60, H - 90) });
+  if (frame % 70  === 0) clouds.push({ x: W + 80, y: rand(15, H/2 - 30), w: rand(50, 110) });
+
+  // physics
+  velY += 0.36;
+  velY = Math.min(velY, 9);
+  planeY += velY;
+  // ceiling: keep wing tips on screen (wing extends 52px above centre)
+  if (planeY < 58)      { planeY = 58; velY = 0; }
+  // ground: gear wheels (42px below centre) hit the grass
+  if (planeY > H - 82)  { endGame(); return; }
+
+  obstacles.forEach(o => o.x -= speed);
+  cargo.forEach(c     => c.x -= speed * 0.85);
+  clouds.forEach(cl   => cl.x -= 1.6);
+  obstacles = obstacles.filter(o  => o.x > -65);
+  cargo     = cargo.filter(c      => c.x > -30);
+  clouds    = clouds.filter(cl    => cl.x > -130);
+
+  // collisions — fuselage hitbox (nose at PLANE_X+90, tail at PLANE_X-100)
+  for (const o of obstacles) {
+    if (o.x > PLANE_X - 90 && o.x < PLANE_X + 90 && Math.abs(planeY - o.y) < 20) {
+      endGame(); return;
+    }
+  }
+  cargo = cargo.filter(c => {
+    if (c.x > PLANE_X - 95 && c.x < PLANE_X + 90 && Math.abs(planeY - c.y) < 35) {
+      score += 50; return false;
+    }
+    return true;
+  });
+}
+
+function endGame() {
+  if (score > highScore) highScore = score;
+  state = 'gameover';
+}
+
+// ── draw ──────────────────────────────────────────────────────────────────
+function draw() {
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, '#4a9fd4'); sky.addColorStop(1, '#87CEEB');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+
+  ctx.fillStyle = '#90EE90'; ctx.fillRect(0, H - 42, W, 32);
+  ctx.fillStyle = '#228B22'; ctx.fillRect(0, H - 10, W, 10);
+
+  clouds.forEach(cl => drawCloud(cl.x, cl.y, cl.w));
+  cargo.forEach(c     => drawCargo(c.x, c.y));
+  obstacles.forEach(o => o.kind === 'bird' ? drawBird(o.x, o.y) : drawStorm(o.x, o.y));
+  drawPlane(PLANE_X - 100, planeY);   // x=50  nose at ~257
+
+  if (state === 'playing' || state === 'gameover') {
+    ctx.font = 'bold 20px Arial';
+    ctx.fillStyle = 'white';   ctx.fillText('Score: ' + score, 14, 32);
+    ctx.fillStyle = '#003366'; ctx.fillText('Score: ' + score, 12, 30);
+    const lvl = Math.max(1, Math.floor((speed - 4) * 2) + 1);
+    ctx.font = '13px Arial'; ctx.fillStyle = '#003366';
+    ctx.fillText('Level: ' + lvl, 12, 52);
+  }
+  if (state === 'start')    drawStartScreen();
+  if (state === 'gameover') drawGameOver();
+}
+
+// ── An-225, facing RIGHT, with 6 engines (3 pairs) + landing gear ──────────
+function drawPlane(x, y) {
+  // x = left anchor, y = fuselage centre.  Nose → right.  Total width ~207px.
+
+  // ① PYLONS — drawn first so wing+fuselage cover their middle sections
+  ctx.strokeStyle = '#888'; ctx.lineWidth = 2.5;
+  [ [x+91, y-14], [x+74, y-19], [x+57, y-36] ].forEach(([px, top]) => {
+    ctx.beginPath(); ctx.moveTo(px, top); ctx.lineTo(px, y+18); ctx.stroke();
+  });
+
+  // ② LANDING GEAR
+  ctx.strokeStyle = '#666'; ctx.lineWidth = 2.5;
+  // — nose gear strut + axle
+  ctx.beginPath(); ctx.moveTo(x+176, y+13); ctx.lineTo(x+174, y+30); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x+167, y+30); ctx.lineTo(x+181, y+30); ctx.stroke();
+  [x+166, x+180].forEach(wx => wheel(wx, y+36, 5));
+
+  // — 3 main-gear bogies (each with 3 wheels → 9 visible main wheels)
+  [ [x+88, [x+81, x+88, x+95]],
+    [x+71, [x+64, x+71, x+78]],
+    [x+54, [x+47, x+54, x+61]] ].forEach(([sx, ws]) => {
+    ctx.strokeStyle = '#666'; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(sx, y+13); ctx.lineTo(sx, y+29); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx-10, y+29); ctx.lineTo(sx+10, y+29); ctx.stroke();
+    ws.forEach(wx => wheel(wx, y+35, 5));
+  });
+
+  // ③ HORIZONTAL STABILISER
+  ctx.fillStyle = '#ccc'; ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(x+14, y-8); ctx.lineTo(x-8, y-22);
+  ctx.lineTo(x-8, y+18); ctx.lineTo(x+14, y+4);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+
+  // ④ TWIN VERTICAL TAIL FINS  (H-tail: two fins, near + far)
+  ctx.fillStyle = '#ddd'; ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(x+8, y-13); ctx.lineTo(x+22, y-52);
+  ctx.lineTo(x+35, y-52); ctx.lineTo(x+24, y-13);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#c5c5c5';
+  ctx.beginPath();
+  ctx.moveTo(x+21, y-13); ctx.lineTo(x+35, y-52);
+  ctx.lineTo(x+48, y-52); ctx.lineTo(x+37, y-13);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+
+  // ⑤ FUSELAGE  (wide ellipse + pointed nose bezier)
+  ctx.fillStyle = 'white'; ctx.strokeStyle = '#999'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.ellipse(x+93, y, 93, 14, 0, 0, Math.PI*2);
+  ctx.fill(); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x+183, y-11);
+  ctx.bezierCurveTo(x+197, y-6, x+207, y-1, x+207, y+1);
+  ctx.bezierCurveTo(x+207, y+3, x+197, y+9, x+183, y+11);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+
+  // ⑥ WING  (high-mounted, swept back slightly)
+  ctx.fillStyle = '#e0e0e0'; ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(x+106, y-13);   // root front
+  ctx.lineTo(x+60,  y-52);   // tip front
+  ctx.lineTo(x+42,  y-52);   // tip back
+  ctx.lineTo(x+80,  y-13);   // root back
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.strokeStyle = '#c8c8c8'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x+106, y-13); ctx.lineTo(x+60, y-52); ctx.stroke(); // LE highlight
+
+  // ⑦ 6 ENGINES — 3 groups × (far engine + near engine) = 6 total
+  [x+91, x+74, x+57].forEach(ex => {
+    // far-side engine (lighter, slightly higher — depth cue)
+    ctx.fillStyle = '#6a6a6a'; ctx.strokeStyle = '#444'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.ellipse(ex, y+19, 13, 5, 0, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#111';   // intake (right = front of engine)
+    ctx.beginPath(); ctx.ellipse(ex+13, y+19, 3.5, 5, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#aaa';   // exhaust nozzle (left = rear)
+    ctx.beginPath(); ctx.ellipse(ex-13, y+19, 2.5, 4,   0, 0, Math.PI*2); ctx.fill();
+
+    // near-side engine (darker, slightly lower)
+    ctx.fillStyle = '#505050'; ctx.strokeStyle = '#333'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.ellipse(ex, y+29, 15, 6.5, 0, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#0d0d0d'; // intake
+    ctx.beginPath(); ctx.ellipse(ex+15, y+29, 4.5, 6.5, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#888';    // nozzle
+    ctx.beginPath(); ctx.ellipse(ex-15, y+29, 3, 5,    0, 0, Math.PI*2); ctx.fill();
+  });
+
+  // ⑧ UKRAINIAN FLAG STRIPE
+  ctx.fillStyle = '#0057B7'; ctx.fillRect(x+30, y-7, 130, 7);
+  ctx.fillStyle = '#FFD700'; ctx.fillRect(x+30, y,   130, 7);
+
+  // ⑨ COCKPIT WINDOWS
+  [x+170, x+184].forEach(wx => {
+    ctx.fillStyle = '#a8d8ff'; ctx.strokeStyle = '#888'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.ellipse(wx, y-5, 5, 4, -0.2, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+  });
+  [x+125, x+142, x+157].forEach(wx => {
+    ctx.fillStyle = '#c8eaff'; ctx.strokeStyle = '#999'; ctx.lineWidth = 0.8;
+    ctx.beginPath(); ctx.ellipse(wx, y-7, 4, 3, 0, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+  });
+
+  // ⑩ AN-225 LABEL
+  ctx.fillStyle = '#003366'; ctx.font = 'bold 8px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('AN-225', x+100, y+5);
+  ctx.textAlign = 'left';
+}
+
+function wheel(cx, cy, r) {
+  ctx.fillStyle = '#1a1a1a'; ctx.strokeStyle = '#555'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#777';
+  ctx.beginPath(); ctx.arc(cx, cy, 2, 0, Math.PI*2); ctx.fill();
+}
+
+function drawBird(x, y) {
+  const flap = Math.floor(frame / 9) % 2 === 0 ? -8 : 3;
+  ctx.strokeStyle = '#333'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(x-14, y); ctx.quadraticCurveTo(x-7, y+flap, x, y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x, y);    ctx.quadraticCurveTo(x+7, y+flap, x+14, y); ctx.stroke();
+  ctx.fillStyle = '#555';
+  ctx.beginPath(); ctx.ellipse(x, y-10, 4, 5, 0, 0, Math.PI*2); ctx.fill();
+}
+
+function drawStorm(x, y) {
+  ctx.fillStyle = '#5a5a7a';
+  [[-20,-14,40,28],[-30,-6,42,22],[-8,-6,42,22]].forEach(([dx,dy,w,h]) => {
+    ctx.beginPath(); ctx.ellipse(x+dx+w/2, y+dy+h/2, w/2, h/2, 0, 0, Math.PI*2); ctx.fill();
+  });
+  ctx.strokeStyle = '#FFD700'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x+2, y+8); ctx.lineTo(x-6, y+20); ctx.lineTo(x+2, y+17); ctx.lineTo(x-4, y+30);
+  ctx.stroke();
+}
+
+function drawCargo(x, y) {
+  ctx.fillStyle = '#8B4513'; ctx.strokeStyle = '#5C2D0A'; ctx.lineWidth = 2;
+  ctx.fillRect(x-14, y-14, 28, 28); ctx.strokeRect(x-14, y-14, 28, 28);
+  ctx.beginPath(); ctx.moveTo(x-14, y); ctx.lineTo(x+14, y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x, y-14); ctx.lineTo(x, y+14); ctx.stroke();
+  ctx.fillStyle = '#FFD700'; ctx.font = 'bold 9px Arial';
+  ctx.textAlign = 'center'; ctx.fillText('+50', x, y+4); ctx.textAlign = 'left';
+}
+
+function drawCloud(x, y, w) {
+  ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  [[0,w/2,w/2],[w*0.1,-w*0.2,w*0.3],[w*0.3,-w*0.1,w*0.35]].forEach(([ox,oy,r]) => {
+    ctx.beginPath(); ctx.arc(x+ox, y+oy, r, 0, Math.PI*2); ctx.fill();
+  });
+}
+
+function drawStartScreen() {
+  ctx.fillStyle = 'rgba(0,30,80,0.75)';
+  ctx.beginPath(); ctx.roundRect(W/2-320, 28, 640, 200, 14); ctx.fill();
+  ctx.fillStyle = '#FFD700'; ctx.font = 'bold 28px Arial'; ctx.textAlign = 'center';
+  ctx.fillText("Lewis's An-225 Adventure!", W/2, 88);
+  ctx.fillStyle = 'white'; ctx.font = '15px Arial';
+  ctx.fillText("Fly the World's Biggest Cargo Plane!", W/2, 123);
+  ctx.fillStyle = '#aadaff'; ctx.font = '14px Arial';
+  ctx.fillText("SPACE or ↑  to fly UP    |    ↓  to dive DOWN", W/2, 165);
+  ctx.fillStyle = '#FFD700'; ctx.font = '13px Arial';
+  ctx.fillText("Avoid birds & storms!   Collect cargo crates for +50 pts!", W/2, 196);
+  ctx.fillStyle = 'white'; ctx.font = 'italic 14px Arial';
+  ctx.fillText("Press SPACE or ↑ to start!", W/2, 224);
+  ctx.textAlign = 'left';
+}
+
+function drawGameOver() {
+  const cx = W/2, cy = H/2;
+  ctx.fillStyle = 'rgba(0,30,100,0.88)';
+  ctx.beginPath(); ctx.roundRect(cx-230, cy-105, 460, 210, 14); ctx.fill();
+  ctx.strokeStyle = '#FFD700'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.roundRect(cx-230, cy-105, 460, 210, 14); ctx.stroke();
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#FFD700'; ctx.font = 'bold 20px Arial';
+  ctx.fillText('Oh no — An-225 needs a rest!', cx, cy-62);
+  ctx.fillStyle = 'white'; ctx.font = 'bold 26px Arial';
+  ctx.fillText('Score: ' + score, cx, cy-18);
+  ctx.fillStyle = '#aadaff'; ctx.font = '17px Arial';
+  ctx.fillText('Best: ' + highScore, cx, cy+20);
+  ctx.fillStyle = 'white'; ctx.font = '15px Arial';
+  ctx.fillText('Press  R  to fly again!', cx, cy+58);
+  ctx.fillStyle = '#FFD700'; ctx.font = 'italic 14px Arial';
+  ctx.fillText('Amazing flying, Lewis!', cx, cy+90);
+  ctx.textAlign = 'left';
+}
+
+function rand(a, b) { return Math.floor(Math.random() * (b - a + 1)) + a; }
+
+reset();
+loop();
+</script>
+</body>
+</html>
