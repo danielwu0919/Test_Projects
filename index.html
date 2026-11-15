@@ -19,7 +19,8 @@
 </head>
 <body>
 <canvas id="c" width="800" height="450"></canvas>
-<p><b>SPACE / ↑ / hold screen</b> = climb &nbsp;|&nbsp; <b>↓</b> = dive &nbsp;|&nbsp;
+<p><b>SPACE / ↑ / hold top of screen</b> = climb &nbsp;|&nbsp;
+   <b>↓ / hold bottom of screen</b> = dive &nbsp;|&nbsp;
    <b>P</b> = pause &nbsp;|&nbsp; <b>R</b> = restart</p>
 
 <!-- 3D sprite list, generated from the Blender models; the game falls back to drawn art without it -->
@@ -174,11 +175,37 @@ document.addEventListener('keyup', e => {
   if (UP_KEYS.includes(e.code)) input.up = false;
   if (DOWN_KEYS.includes(e.code)) input.down = false;
 });
-canvas.addEventListener('pointerdown', e => { e.preventDefault(); pressUp(); input.up = true; });
+// Touch and mouse: hold the upper part of the screen to climb and the bottom part to dive.  On
+// the runway the whole screen climbs, because the plane itself is parked in the dive zone.
+const DIVE_ZONE = 0.62;         // fraction of the screen height where the dive zone starts
+const pointers = new Map();     // pointerId → 'up' | 'down'
+function pointerZone(e) {
+  const r = canvas.getBoundingClientRect();
+  const low = (e.clientY - r.top) / r.height > DIVE_ZONE;
+  return low && state === 'playing' && !plane.onGround ? 'down' : 'up';
+}
+function syncPointers() {
+  const held = [...pointers.values()];
+  input.up = held.includes('up');
+  input.down = held.includes('down');
+}
+canvas.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  const zone = pointerZone(e);
+  if (zone === 'up') pressUp();
+  pointers.set(e.pointerId, zone);
+  syncPointers();
+});
+canvas.addEventListener('pointermove', e => {             // sliding a finger between the zones
+  if (!pointers.has(e.pointerId)) return;
+  pointers.set(e.pointerId, pointerZone(e));
+  syncPointers();
+});
 ['pointerup', 'pointercancel', 'pointerleave'].forEach(n =>
-  canvas.addEventListener(n, () => { input.up = false; }));
+  canvas.addEventListener(n, e => { pointers.delete(e.pointerId); syncPointers(); }));
 window.addEventListener('blur', () => {
   input.up = input.down = false;
+  pointers.clear();
   if (state === 'playing') state = 'paused';
 });
 
@@ -1260,7 +1287,7 @@ function drawLegend() {
 function drawStartScreen() {
   panel(W / 2 - 300, 12, 600, 290, 16, 'rgba(4,22,62,0.86)', '#FFD700');
   text("Lewis's An-225 Adventure!", W / 2, 52, 30, '#FFD700', { align: 'center', outline: '#04163e' });
-  text('Hold SPACE or ↑ (or hold the screen) to take off and climb   •   ↓ to dive', W / 2, 76, 13.5, '#aadaff',
+  text('Hold SPACE, ↑ or the top of the screen to climb   •   ↓ or the bottom of the screen to dive', W / 2, 76, 12.5, '#aadaff',
        { align: 'center', weight: 'normal' });
   text('Catch crates in a row for a combo up to x5   •   Land softly or lose a heart!', W / 2, 96, 13.5, '#FFD700',
        { align: 'center', weight: 'normal' });
@@ -1283,7 +1310,7 @@ function drawGameOver() {
        cx, cy + 34, 14, '#d6e6ff', { align: 'center', weight: 'normal' });
   if (overT > 45) {
     ctx.globalAlpha = a * (0.65 + 0.35 * Math.sin(clock * 0.09));
-    text('Press R or SPACE to fly again!', cx, cy + 68, 16, '#ffffff', { align: 'center' });
+    text('Press R or SPACE, or tap, to fly again!', cx, cy + 68, 16, '#ffffff', { align: 'center' });
   }
   ctx.globalAlpha = a;
   text('Amazing flying, Lewis!', cx, cy + 96, 14, '#FFD700', { align: 'center', weight: 'italic' });

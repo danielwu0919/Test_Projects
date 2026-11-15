@@ -1,0 +1,60 @@
+Lewis's An-225 Adventure — Project Summary
+===========================================
+
+What we built:
+A browser-based side-scrolling game for Lewis, featuring the Antonov An-225
+(the world's biggest cargo plane). No installs required — runs in any web browser.
+
+How to play:
+- SPACE or UP arrow (hold) = climb; a quick tap gives a small hop
+- DOWN arrow (hold) = dive
+- P = pause, R = restart
+- On mobile: hold the top of the screen = climb, hold the bottom = dive
+  (while the plane is on the runway, touching anywhere takes off)
+
+Game features:
+- The An-225 starts on the runway, takes off, and can land again; a gentle
+  landing is free, a hard one costs a heart
+- It is a heavy plane: it climbs and sinks slowly
+- Three hearts. Birds, balloons, storm clouds (and their lightning) and jets
+  each cost a heart — they are marked with a red warning sign and "DODGE!"
+- Cargo crates score points, and catching them in a row builds a combo up to x5.
+  Repairs give a heart back, shields block a hit, magnets pull crates in —
+  all marked with a green ring and "CATCH!"
+- The start screen shows what to catch and what to dodge
+- A new level every 20 seconds: faster, with more obstacles; day turns to
+  sunset and night
+- Best score is saved in the browser between visits
+- "Amazing flying, Lewis!" message on the game over screen
+
+The plane:
+- A 3D model of the real An-225 "Mriya" (UR-82060) built in Blender: Antonov
+  Airlines livery, cockpit windows, six engines, twin tail fins and the
+  many-wheeled landing gear that folds away after take-off
+- Rendered to picture files (sprites) that the game draws; if the pictures are
+  missing the game falls back to a simpler drawn plane
+
+Files:
+- index.html             — the game (mobile-ready, hosted on GitHub Pages)
+- assets/sprites/        — the rendered pictures the game uses, plus sprites.js/.json
+                           with their sizes and anchor points
+- assets/blender/        — the Blender scene (an225_assets.blend) and the script
+                           that builds the models and renders the sprites
+                           (build_assets.py, run with Blender 5.3)
+- lewis_an225_game.py    — Python (tkinter) version of the same game; needs the
+                           Pillow package to show the sprites
+
+Why we switched from Python to HTML:
+The system Python 3.9 on macOS uses a deprecated version of Tk (the graphics
+library) that cannot draw anything on the canvas. Rewriting as an HTML file
+means it works instantly in any browser with no installation needed.
+
+Mobile support:
+- <meta name="viewport"> tag so the page fits phone screens
+- The canvas scales to fill the screen on any device
+- Touch: hold the top of the screen to climb, the bottom to dive
+
+Hosting on GitHub Pages:
+1. Renamed the file to index.html and pushed it to GitHub
+2. Enabled GitHub Pages in repo Settings -> Pages -> Branch: main / root
+3. Live URL: https://danielwu0919.github.io/Test_Projects/
