@@ -22,6 +22,8 @@
 <p><b>SPACE / ↑ / hold screen</b> = climb &nbsp;|&nbsp; <b>↓</b> = dive &nbsp;|&nbsp;
    <b>P</b> = pause &nbsp;|&nbsp; <b>R</b> = restart</p>
 
+<!-- 3D sprite list, generated from the Blender models; the game falls back to drawn art without it -->
+<script src="assets/sprites/sprites.js"></script>
 <script>
 'use strict';
 
@@ -29,7 +31,10 @@
 const W = 800, H = 450;
 const GROUND = H - 44;          // y of the grass line
 const PLANE_X = 190;            // screen x of the plane's centre
-const GEAR_DROP = 38;           // wheel bottoms sit this far below the fuselage centre
+const RUNWAY_Y = GROUND + 12;   // where the wheels meet the grass
+const GEAR_TRAVEL = 12;         // how far the gear sprite slides up into the belly when retracted
+const PLANE_SCALE = 1.2;        // the 3D An-225 is drawn a little larger than it was modelled
+const HARD_LANDING = 3;         // touchdown sink rate (px/tick) that damages the hull
 const STEP = 1000 / 60;         // fixed physics step (ms) — same speed on any monitor
 const LEVEL_TICKS = 1200;       // 20 s per level
 const MAX_HP = 3, MAX_COMBO = 5;
@@ -53,7 +58,7 @@ const css  = c => `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
 
 // Every scenery / object colour goes through C() so the whole world is lit by
 // the current time of day (white at noon, orange at sunset, deep blue at night).
-let amb = [1, 1, 1];
+let amb = [1, 1, 1], ambKey = '1,1,1';
 const tintCache = new Map();
 function tint3(c) { return [c[0] * amb[0], c[1] * amb[1], c[2] * amb[2]]; }
 function C(hex) {
@@ -63,7 +68,7 @@ function C(hex) {
 }
 function setAmbient(rgb) {
   const q = rgb.map(v => Math.round(v / 255 * 40) / 40);
-  if (q[0] !== amb[0] || q[1] !== amb[1] || q[2] !== amb[2]) { amb = q; tintCache.clear(); }
+  if (q[0] !== amb[0] || q[1] !== amb[1] || q[2] !== amb[2]) { amb = q; ambKey = q.join(); tintCache.clear(); }
 }
 
 // ── time of day: one phase per level, cycling day → night → day ─────────────
@@ -101,26 +106,31 @@ let score = 0, scoreF = 0, dist = 0, level = 1, hp = MAX_HP, combo = 1, crates =
 let best = 0, newBest = false, overT = 0;
 let obstacles = [], pickups = [], particles = [], popups = [], clouds = [];
 let spawnT = 0, crateT = 0, powerT = 0, lastY = H / 2;
-let shake = 0, flash = 0, banner = null, touchCool = 0;
-const plane = { y: 300, vy: 0, pitch: 0, gear: 0, invuln: 0, shield: 0, magnet: 0, down: false };
+let shake = 0, flash = 0, banner = null;
+let tips = {};                  // how many of each kind of thing have appeared this flight
+const plane = { y: 300, vy: 0, pitch: 0, gear: 1, invuln: 0, shield: 0, magnet: 0,
+                onGround: true, susp: 0, suspV: 0, airT: 0 };
 const input = { up: false, down: false };
 
 try { best = parseInt(localStorage.getItem('lewis_an225_best'), 10) || 0; } catch (e) { best = 0; }
 
 function initClouds() {
   clouds = Array.from({ length: 9 }, () => ({
-    x: rand(-60, W + 60), y: rand(26, 215), s: rand(0.45, 1.25), d: rand(0.15, 0.7),
+    x: rand(-60, W + 60), y: rand(26, 215), s: rand(0.45, 1.25), d: rand(0.15, 0.7), v: randi(0, 2),
   })).sort((a, b) => a.d - b.d);
 }
 
 function startGame() {
   state = 'playing';
   ticks = 0; score = 0; scoreF = 0; dist = 0; level = 1; hp = MAX_HP; combo = 1; crates = 0;
-  speed = 4; newBest = false; overT = 0;
-  obstacles = []; pickups = []; popups = [];
-  spawnT = 110; crateT = 140; powerT = 620; lastY = H / 2;
-  shake = 0; flash = 0; touchCool = 0;
-  Object.assign(plane, { y: 290, vy: -2, pitch: 0, gear: 0, invuln: 90, shield: 0, magnet: 0, down: false });
+  speed = Math.max(speed, 0.6); newBest = false; overT = 0;         // accelerate from wherever we were rolling
+  obstacles = []; pickups = []; popups = []; tips = {};
+  spawnT = 170; crateT = 200; powerT = 620; lastY = H / 2;
+  shake = 0; flash = 0;
+  // every flight starts with a take-off roll
+  Object.assign(plane, { vy: 0, pitch: 0, gear: 1, invuln: 120, shield: 0, magnet: 0,
+                         onGround: true, susp: 0, suspV: 0, airT: 0 });
+  plane.y = floorY();
   banner = { title: 'Level 1', sub: SKY[0].name, t: 150 };
 }
 
@@ -145,7 +155,10 @@ function pressUp() {
   if (state === 'start') startGame();
   else if (state === 'gameover') { if (overT > 45) startGame(); }
   else if (state === 'paused') togglePause();
-  else if (state === 'playing' && plane.vy > -4) plane.vy -= 2.4;   // a tap gives a little hop
+  else if (state === 'playing') {
+    if (plane.onGround) plane.pitch -= 0.03;              // on the runway a tap just nudges the nose up
+    else if (plane.vy > -2.2) plane.vy -= 1.2;            // in the air a tap gives a little hop
+  }
 }
 
 document.addEventListener('keydown', e => {
@@ -175,6 +188,23 @@ const FAR_WING  = [[44, -13], [-14, -46], [-30, -46], [2, -13]];
 const NEAR_ENG = [0.26, 0.5, 0.74].map(t => [lerp(40, -34, t) + 5, lerp(-9, 30, t) + 5]);
 const FAR_ENG  = [0.3, 0.55, 0.8].map(t => [lerp(44, -14, t) + 4, lerp(-13, -46, t) + 4]);
 
+// Numbers the physics needs from the plane's shape.  These match the hand-drawn fallback plane;
+// once the 3D sprites load they are replaced by the points exported from the Blender model.
+let GEOM = {
+  caps: [[[-96, -2], [94, 1], 12], [[30, -4], [-38, 26], 7]],     // fuselage and near wing: [a, b, radius]
+  wheels: { rear: -30, front: 20, nose: 74, drop: 38 },           // wheel x positions, and depth below centre
+  exhaust: NEAR_ENG.map(([x, y]) => [x - 18, y]).concat(FAR_ENG.map(([x, y]) => [x - 15, y])),
+  lights: { wing: [-43, 30], tail: [-114, -19], top: [8, -16] },
+};
+
+// How far below the plane's centre its lowest wheel is at a given pitch: nose-up puts the
+// rear main wheels lowest, nose-down the nose wheel.
+function gearReach(pitch) {
+  const s = Math.sin(pitch), w = GEOM.wheels;
+  return Math.max(w.rear * s, w.front * s, w.nose * s) + w.drop * Math.cos(pitch);
+}
+const floorY = () => RUNWAY_Y - gearReach(plane.pitch);    // plane.y when the wheels are on the grass
+
 function planeToWorld(lx, ly) {
   const c = Math.cos(plane.pitch), s = Math.sin(plane.pitch);
   return [PLANE_X + lx * c - ly * s, plane.y + lx * s + ly * c];
@@ -182,10 +212,7 @@ function planeToWorld(lx, ly) {
 
 // Collision shape: two capsules (fuselage + near wing) that rotate with the plane.
 function planeCapsules() {
-  return [
-    { a: planeToWorld(-96, -2), b: planeToWorld(94, 1), r: 12 },
-    { a: planeToWorld(30, -4),  b: planeToWorld(-38, 26), r: 7 },
-  ];
+  return GEOM.caps.map(([a, b, r]) => ({ a: planeToWorld(...a), b: planeToWorld(...b), r }));
 }
 
 function distToSeg(px, py, a, b) {
@@ -197,7 +224,7 @@ function distToSeg(px, py, a, b) {
 // Hit circles for each obstacle type, as [dx, dy, radius] (a touch smaller than the art).
 const SHAPES = {
   bird:    [[-2, -1, 9]],
-  balloon: [[0, -15, 25], [0, 32, 7]],
+  balloon: [[0, -13, 25], [0, 31, 7]],
   storm:   [[-24, 4, 17], [0, -2, 22], [24, 4, 17]],
   jet:     [[-18, 0, 7], [0, 1, 8], [18, -3, 8]],
 };
@@ -230,9 +257,16 @@ function pickY(min, max, sep = 85) {
   return y;
 }
 
+// The first two times each kind of thing appears in a flight it carries a "CATCH!" or "DODGE!"
+// label, so a new pilot learns what is what.
+function wantTip(kind) {
+  tips[kind] = (tips[kind] || 0) + 1;
+  return tips[kind] <= 2;
+}
+
 function newObstacle(kind, props) {
   obstacles.push({ kind, x: W + 40, y: 0, vx: 0, t: 0, minGap: 1e9, seed: rand(0, 100),
-                   phase: rand(0, TAU), ...props });
+                   phase: rand(0, TAU), ...props, tip: props.tip !== false && wantTip(kind) });
 }
 
 function spawnObstacle() {
@@ -251,21 +285,21 @@ function spawnObstacle() {
     for (let k = 1; k <= rows; k++)
       for (const side of [-1, 1])
         newObstacle('bird', { x: W + 40 + 26 * k, y: y + side * 18 * k, baseY: y + side * 18 * k,
-                              amp: 8, phase, vx });
+                              amp: 8, phase, vx, tip: false });
   } else {
-    const y = pickY(60, GROUND - 45);
+    const y = pickY(60, GROUND - 20);                     // single birds can skim the ground too
     newObstacle('bird', { y, baseY: y, amp: rand(6, 18), vx: rand(0.8, 1.6) });
   }
 }
 
-function newPickup(kind, x, y) {
-  pickups.push({ kind, x, y, baseY: y, t: 0, phase: rand(0, TAU) });
+function newPickup(kind, x, y, tip = true) {
+  pickups.push({ kind, x, y, baseY: y, t: 0, phase: rand(0, TAU), tip: tip && wantTip(kind) });
 }
 
 function spawnCrates() {
   const y = rand(70, GROUND - 75);
   const n = Math.random() < 0.25 ? 3 : 1;                // sometimes a row of three
-  for (let i = 0; i < n; i++) newPickup('crate', W + 30 + i * 70, y);
+  for (let i = 0; i < n; i++) newPickup('crate', W + 30 + i * 70, y, i === 0);
 }
 
 function spawnPower() {
@@ -305,16 +339,16 @@ function dust(x, y, n, power = 1) {
 function emitExhaust() {
   if (clock % 2) return;
   const hurt = state === 'crashing' || state === 'gameover';
-  NEAR_ENG.concat(FAR_ENG).forEach(([ex, ey], i) => {
+  GEOM.exhaust.forEach(([ex, ey], i) => {
     const far = i >= 3;
-    const [x, y] = planeToWorld(ex - (far ? 15 : 18), ey);
+    const [x, y] = planeToWorld(ex, ey);
     if (!hurt)
       emit({ x, y, vx: -speed * 0.55 - 1.2, vy: rand(-0.12, 0.12), life: 26, r: far ? 1.6 : 2.2,
              grow: 0.2, col: '#ffffff', a: far ? 0.16 : 0.3, tint: true });
   });
   // a struggling engine smokes when the hull is nearly gone
   if ((hp === 1 && state === 'playing' && clock % 4 === 0) || (hurt && clock % 4 === 0)) {
-    const [x, y] = planeToWorld(NEAR_ENG[1][0] - 14, NEAR_ENG[1][1]);
+    const [x, y] = planeToWorld(GEOM.exhaust[1][0] + 4, GEOM.exhaust[1][1]);
     emit({ x, y, vx: -speed * 0.6 - 0.5, vy: rand(-0.9, -0.3), life: 46, r: 3.5, grow: 0.3,
            col: '#3a3d44', a: 0.55, tint: true, front: true });
   }
@@ -336,7 +370,67 @@ function hitPlane(o, why) {
   if (o) plane.vy += plane.y < o.y ? -2.6 : 2.6;          // knocked away from whatever we hit
   sparkle(o ? (o.x + PLANE_X) / 2 : PLANE_X, o ? (o.y + plane.y) / 2 : plane.y + 30, '#ffcf5a', 14);
   popup(why || 'Ouch!', PLANE_X, plane.y - 46, '#ff8a8a');
-  if (hp <= 0) { state = 'crashing'; plane.down = false; plane.shield = plane.magnet = 0; }
+  if (hp <= 0) { state = 'crashing'; plane.shield = plane.magnet = 0; }
+}
+
+// ── flight physics ─────────────────────────────────────────────────────────
+// In the air: thrust, gravity and drag, an air cushion close to the ground, and a flare
+// that brings the nose up before the wheels touch.
+function fly() {
+  const alt = floorY() - plane.y;
+  // A heavy aeroplane: it gathers vertical speed slowly and never gets much of it.  Held
+  // inputs settle at about 3.6 px/tick up, 2.5 down hands-off and 5 in a dive.
+  let ay = 0.12;                                          // gravity
+  if (input.up) ay -= 0.29;                               // lift while climbing
+  if (input.down) ay += 0.12;                             // nose-down dive
+  if (alt < 50) ay -= 0.05 * (1 - Math.max(alt, 0) / 50); // ground effect
+  if (plane.y < 52) ay += (52 - plane.y) * 0.02;          // thin air: soft ceiling
+  plane.vy = clamp((plane.vy + ay) * 0.955, -4.2, 5.6);   // drag gives the big plane its weight
+  plane.y += plane.vy;
+  if (plane.y < 34) { plane.y = 34; plane.vy = Math.max(plane.vy, 0); }
+
+  let want = clamp(Math.atan2(plane.vy, 10), -0.45, 0.4);
+  want = lerp(want, Math.min(want, -0.05), clamp(1 - alt / 70, 0, 1));      // flare
+  plane.pitch += (want - plane.pitch) * 0.1;
+  plane.gear = clamp(plane.gear + (alt < 110 ? 0.06 : -0.04), 0, 1);
+  plane.airT++;
+
+  const fy = floorY();
+  if (plane.y >= fy) {
+    plane.y = fy;
+    if (plane.vy >= 0) touchDown();
+  }
+}
+
+// The wheels have met the grass.  A gentle arrival settles onto the gear, a firm one skips
+// once, and a hard one bounces and costs a heart.  Each bounce loses most of its energy,
+// so the plane always ends up rolling instead of hopping forever.
+function touchDown() {
+  const v = plane.vy, wx = PLANE_X + (GEOM.wheels.rear + GEOM.wheels.front) / 2;
+  plane.suspV += Math.min(v, 5) * 0.8;                    // the landing gear soaks up the hit
+  if (v > HARD_LANDING) {
+    plane.vy = -v * 0.38;
+    dust(wx, RUNWAY_Y, 16, 1.5);
+    hitPlane(null, 'Hard landing!');
+  } else if (v > 1.7) {
+    plane.vy = -v * 0.25;
+    dust(wx, RUNWAY_Y, 7);
+  } else {
+    plane.onGround = true; plane.vy = 0;
+    dust(wx, RUNWAY_Y, 4, 0.6);
+    if (plane.airT > 90) popup('Smooth landing!', PLANE_X, plane.y - 46, '#d9f7c9', 13);
+  }
+}
+
+// Rolling on the gear: the wheels stay planted and nothing bounces.  Holding climb raises
+// the nose about the main wheels (faster with more speed); once rotated, the plane lifts off.
+function groundRoll() {
+  plane.vy = 0; plane.airT = 0;
+  plane.gear = Math.min(1, plane.gear + 0.06);
+  const rate = input.up ? 0.055 * clamp(speed / 4, 0.4, 1) : 0.07;
+  plane.pitch += ((input.up ? -0.17 : 0) - plane.pitch) * rate;
+  plane.y = floorY();
+  if (input.up && plane.pitch < -0.09) { plane.onGround = false; plane.vy = -1; }
 }
 
 function updatePlay() {
@@ -346,44 +440,20 @@ function updatePlay() {
     level = lv;
     banner = { title: 'Level ' + level, sub: SKY[(level - 1) % SKY.length].name, t: 150 };
   }
-  speed += (Math.min(4 + (level - 1) * 0.5, 9.5) - speed) * 0.01;
-  dist += speed;
-  scoreF += speed / 4;
-  score += Math.floor(scoreF); scoreF -= Math.floor(scoreF);
-
-  // ── flight physics: thrust / gravity / drag, plus a ground-effect cushion ──
-  const floorY = GROUND - GEAR_DROP;
-  const alt = floorY - plane.y;
-  let ay = 0.30;                                          // gravity
-  if (input.up) ay -= 0.72;                               // lift while climbing
-  if (input.down) ay += 0.38;                             // nose-down dive
-  if (alt < 50) ay -= 0.12 * (1 - Math.max(alt, 0) / 50); // air cushion just above the ground
-  if (plane.y < 52) ay += (52 - plane.y) * 0.05;          // thin air: soft ceiling
-  plane.vy = clamp((plane.vy + ay) * 0.94, -7, 8.5);      // drag gives the big plane its weight
-  plane.y += plane.vy;
-  if (plane.y < 34) { plane.y = 34; plane.vy = Math.max(plane.vy, 0); }
-
-  plane.pitch += (clamp(Math.atan2(plane.vy, 13), -0.45, 0.4) - plane.pitch) * 0.14;
-  plane.gear = clamp(plane.gear + (alt < 110 ? 0.06 : -0.04), 0, 1);
-
-  if (plane.y >= floorY) {                                // wheels on the grass
-    plane.y = floorY;
-    if (plane.vy > 3) {                                   // came down hard
-      plane.vy = -3.8; dust(PLANE_X, GROUND, 16, 1.5);
-      hitPlane(null, 'Hard landing!');
-    } else {                                              // gentle touch-and-go costs nothing
-      plane.vy = -Math.max(1.8, plane.vy * 0.6) - 0.8; dust(PLANE_X, GROUND, 7);
-      if (touchCool <= 0) popup('Touch and go!', PLANE_X, plane.y - 46, '#d9f7c9', 13);
-      touchCool = 90;
-    }
+  speed += (Math.min(3.5 + (level - 1) * 0.38, 7.5) - speed) * (speed < 3.6 ? 0.02 : 0.01);   // brisk take-off roll
+  if (!plane.onGround) {                                  // distance and score only count while flying
+    dist += speed;
+    scoreF += speed / 4;
+    score += Math.floor(scoreF); scoreF -= Math.floor(scoreF);
   }
-  if (touchCool > 0) touchCool--;
+
+  if (plane.onGround) groundRoll(); else fly();
   if (plane.invuln > 0) plane.invuln--;
   if (plane.shield > 0) plane.shield--;
   if (plane.magnet > 0) plane.magnet--;
 
   // ── spawning ──
-  if (--spawnT <= 0) { spawnObstacle(); spawnT = Math.max(40, 104 - level * 8) * rand(0.8, 1.25); }
+  if (--spawnT <= 0) { spawnObstacle(); spawnT = Math.max(56, 130 - level * 9) * rand(0.8, 1.25); }
   if (--crateT <= 0) { spawnCrates(); crateT = rand(140, 230); }
   if (--powerT <= 0) { spawnPower(); powerT = rand(700, 1000); }
 
@@ -401,7 +471,7 @@ function updatePlay() {
     o.minGap = Math.min(o.minGap, gap);
     if (gap < 0) { o.touched = true; hitPlane(o); }
     if (o.kind === 'storm') {
-      if (Math.abs(o.x - PLANE_X) < 130) plane.vy += rand(-0.22, 0.22);     // turbulence
+      if (Math.abs(o.x - PLANE_X) < 130 && !plane.onGround) plane.vy += rand(-0.12, 0.12);   // turbulence
       if (stormStriking(o) && lightningHits(o, caps)) { o.touched = true; hitPlane(o, 'Zap!'); }
     }
     if (state !== 'playing') return;
@@ -439,24 +509,25 @@ function collect(p) {
   }
 }
 
-// Out of hull points: glide down for an emergency landing and roll to a stop.
+// Out of hull points: glide down, flare, and roll out to a stop on the gear.
 function updateCrash() {
-  const floorY = GROUND - GEAR_DROP;
   plane.gear = Math.min(1, plane.gear + 0.06);
-  if (!plane.down) {
-    plane.vy = Math.min(plane.vy + 0.2, 5.5);
+  if (!plane.onGround) {
+    const alt = floorY() - plane.y;
+    plane.vy = Math.min(plane.vy + 0.2, alt < 60 ? 2.4 : 4.5);
     plane.y += plane.vy;
-    plane.pitch += (0.2 - plane.pitch) * 0.05;
-    if (plane.y >= floorY) {
-      plane.y = floorY; plane.down = true; plane.vy = 0; shake = 13;
-      dust(PLANE_X, GROUND, 26, 1.8);
+    plane.pitch += ((alt < 70 ? -0.06 : 0.14) - plane.pitch) * 0.06;
+    if (plane.y >= floorY()) {
+      plane.onGround = true; plane.suspV += plane.vy; plane.vy = 0; shake = 9;
+      dust(PLANE_X, RUNWAY_Y, 22, 1.6);
     }
   } else {
-    speed *= 0.962;
-    plane.pitch += (0 - plane.pitch) * 0.15;
-    if (speed > 0.6 && clock % 3 === 0) dust(PLANE_X - 20, GROUND, 2);
+    speed *= 0.966;
+    plane.pitch += (0 - plane.pitch) * 0.07;
+    if (speed > 0.6 && clock % 3 === 0) dust(PLANE_X - 20, RUNWAY_Y, 2);
     if (speed < 0.2) endGame();
   }
+  if (plane.onGround) plane.y = floorY();
 }
 
 function updateWorld() {
@@ -504,6 +575,9 @@ function updateWorld() {
   for (const p of popups) { p.y -= 0.7; p.life--; }
   popups = popups.filter(p => p.life > 0);
 
+  // landing-gear suspension: a damped spring, so touchdowns settle instead of ringing
+  plane.suspV = (plane.suspV - plane.susp * 0.2) * 0.72;
+  plane.susp = clamp(plane.susp + plane.suspV, -1.5, 6);
   shake *= 0.86; flash *= 0.84;
   if (banner && --banner.t <= 0) banner = null;
 }
@@ -512,15 +586,80 @@ function tick() {
   if (state === 'paused') return;
   clock++;
   if (state === 'start') {
-    speed = 2.2;
-    plane.y = 300 + Math.sin(clock * 0.035) * 12;
-    plane.pitch = Math.cos(clock * 0.035) * 0.05;
-    plane.gear = 0;
+    speed = 2.2;                                          // taxiing, waiting for take-off
+    plane.onGround = true; plane.gear = 1; plane.pitch = 0; plane.vy = 0;
+    plane.y = floorY();
   } else if (state === 'playing') updatePlay();
   else if (state === 'crashing') updateCrash();
   else overT++;
   emitExhaust();
   updateWorld();
+}
+
+// ── 3D sprites ─────────────────────────────────────────────────────────────
+// Rendered from the Blender models by assets/blender/build_assets.py.  If the sprite list or
+// any image is missing, SPR.on stays false and everything is drawn with the vector art below.
+const SPR = { on: false, meta: (window.AN225_SPRITES || {}).sprites, img: {}, lit: new Map() };
+
+function spritesReady() {
+  const K = PLANE_SCALE, p = {};                          // physics now follows the 3D model
+  for (const [name, [x, y]] of Object.entries(SPR.meta.plane_body.points)) p[name] = [x * K, y * K];
+  GEOM = {
+    caps: [[p.fuse_a, p.fuse_b, 11 * K], [p.wing_a, p.wing_b, 5.5 * K]],
+    wheels: { rear: p.wheel_rear[0], front: p.wheel_front[0], nose: p.wheel_nose[0], drop: p.wheel_rear[1] },
+    exhaust: [0, 1, 2, 3, 4, 5].map(i => p['exhaust_' + i]),
+    lights: { wing: p.light_wing, tail: p.light_tail, top: p.light_top },
+  };
+  SPR.on = true;
+}
+
+(function loadSprites() {
+  if (!SPR.meta) return;
+  const names = Object.keys(SPR.meta);
+  let left = names.length, failed = false;
+  for (const name of names) {
+    const im = new Image();
+    im.onload = () => { if (--left === 0 && !failed) spritesReady(); };
+    im.onerror = () => { failed = true; };
+    im.src = 'assets/sprites/' + SPR.meta[name].file;
+    SPR.img[name] = im;
+  }
+})();
+
+// A sprite lit by the current time of day: multiplied by the ambient colour, alpha kept.
+function litSprite(name) {
+  const im = SPR.img[name];
+  if (ambKey === '1,1,1') return im;
+  let t = SPR.lit.get(name);
+  if (!t) {
+    t = { canvas: document.createElement('canvas'), key: '' };
+    t.canvas.width = im.naturalWidth; t.canvas.height = im.naturalHeight;
+    SPR.lit.set(name, t);
+  }
+  if (t.key !== ambKey) {
+    const g = t.canvas.getContext('2d');
+    g.globalCompositeOperation = 'copy'; g.drawImage(im, 0, 0);
+    g.globalCompositeOperation = 'multiply';
+    g.fillStyle = css([amb[0] * 255, amb[1] * 255, amb[2] * 255]);
+    g.fillRect(0, 0, t.canvas.width, t.canvas.height);
+    g.globalCompositeOperation = 'destination-in'; g.drawImage(im, 0, 0);
+    t.key = ambKey;
+  }
+  return t.canvas;
+}
+
+// Draw a sprite with its anchor at (x, y).  o: { scale, rot, alpha, glow } — glow skips the
+// time-of-day tint, for things that shine by themselves.
+function sprite(name, x, y, o = {}) {
+  const m = SPR.meta[name], k = o.scale || 1;
+  const im = o.glow ? SPR.img[name] : litSprite(name);
+  if (o.rot || o.alpha !== undefined) {
+    ctx.save(); ctx.translate(x, y);
+    if (o.rot) ctx.rotate(o.rot);
+    if (o.alpha !== undefined) ctx.globalAlpha *= o.alpha;
+    ctx.drawImage(im, -m.ax * k, -m.ay * k, m.w * k, m.h * k);
+    ctx.restore();
+  } else ctx.drawImage(im, x - m.ax * k, y - m.ay * k, m.w * k, m.h * k);
 }
 
 // ── drawing: primitives ────────────────────────────────────────────────────
@@ -615,6 +754,7 @@ function puffs(list, x, y, s, dy) {
   ctx.fill();
 }
 function drawCloud(c) {
+  if (SPR.on) return sprite('cloud_' + c.v, c.x, c.y, { scale: c.s, alpha: 0.55 + 0.45 * c.d });
   ctx.globalAlpha = 0.5 + 0.45 * c.d;
   ctx.fillStyle = C('#c3d2e6'); puffs(CLOUD_PUFFS, c.x, c.y, c.s, 5 * c.s);
   ctx.fillStyle = C('#ffffff'); puffs(CLOUD_PUFFS, c.x, c.y, c.s, 0);
@@ -626,6 +766,13 @@ function drawDecor(env) {
   for (let i = first; i < first + 12; i++) {
     const h = hash(i), x = i * cell - worldX + hash(i + 0.5) * 50, y = GROUND + 3;
     const s = 0.8 + hash(i + 0.25) * 0.55;
+    if (SPR.on) {
+      const kind = h < 0.32 ? 'tree' : h < 0.47 ? 'pine' : h < 0.57 ? 'bush' : h < 0.63 ? 'house' : h < 0.68 ? 'hay' : '';
+      if (kind) sprite(kind, x, y, { scale: kind === 'tree' || kind === 'pine' ? s : 1 });
+      if (kind === 'house' && env.stars > 0.3)             // windows light up at dusk
+        sprite('house_glow', x, y, { glow: true, alpha: clamp((env.stars - 0.3) * 3, 0, 1) });
+      continue;
+    }
     if (h < 0.32) {                                       // leafy tree
       ctx.fillStyle = C('#7a5230'); ctx.fillRect(x - 2 * s, y - 14 * s, 4 * s, 14 * s);
       circle(x, y - 24 * s, 14 * s, C('#3c9648'));
@@ -712,7 +859,26 @@ function wheel(x, y, r) {
   circle(x, y, r, C('#1b1d21')); circle(x, y, r * 0.42, C('#8a9199'));
 }
 
-function drawPlane(x, y, pitch, gear, alpha) {
+function planeLights() {
+  const L = GEOM.lights;
+  if (clock % 64 < 7) glow(L.wing[0], L.wing[1], 9, '255,60,60', 0.95);
+  if (clock % 90 < 5) glow(L.tail[0], L.tail[1], 11, '255,255,255', 0.95);
+  if ((clock + 30) % 64 < 7) glow(L.top[0], L.top[1], 8, '255,70,70', 0.9);
+}
+
+// susp is how far the body has sunk onto its landing gear; the wheels stay where they are.
+function drawPlane(x, y, pitch, gear, alpha, susp) {
+  if (!SPR.on) return drawPlaneVector(x, y + susp, pitch, gear, alpha, susp);
+  ctx.save();
+  ctx.translate(x, y + susp); ctx.rotate(pitch); ctx.globalAlpha = alpha;
+  if (gear > 0.02)                                        // the gear slides up into the belly
+    sprite('plane_gear', 0, -(1 - gear) * GEAR_TRAVEL * PLANE_SCALE - susp, { scale: PLANE_SCALE });
+  sprite('plane_body', 0, 0, { scale: PLANE_SCALE });
+  planeLights();
+  ctx.restore();
+}
+
+function drawPlaneVector(x, y, pitch, gear, alpha, susp) {
   const line = C('#77818c');
   ctx.save();
   ctx.translate(x, y); ctx.rotate(pitch);
@@ -726,7 +892,7 @@ function drawPlane(x, y, pitch, gear, alpha) {
 
   // landing gear swings down as the ground gets close
   if (gear > 0.02) {
-    const wy = 19.5 + 14 * gear;
+    const wy = 19.5 + 14 * gear - susp;
     ctx.strokeStyle = C('#5d646c'); ctx.lineWidth = 2.2;
     ctx.beginPath();
     ctx.moveTo(74, 12); ctx.lineTo(74, wy);
@@ -770,17 +936,14 @@ function drawPlane(x, y, pitch, gear, alpha) {
   ctx.beginPath(); ctx.moveTo(-1, -9); ctx.lineTo(-46, 30); ctx.stroke();               // flap line
   for (const [ex, ey] of NEAR_ENG) nacelle(ex, ey, 1, false);
 
-  // navigation lights
-  if (clock % 64 < 7) glow(-43, 30, 9, '255,60,60', 0.95);
-  if (clock % 90 < 5) glow(-114, -19, 11, '255,255,255', 0.95);
-  if ((clock + 30) % 64 < 7) glow(8, -16, 8, '255,70,70', 0.9);
+  planeLights();
   ctx.restore();
 }
 
 function drawPlaneExtras() {
-  const alt = clamp((GROUND - GEAR_DROP - plane.y) / 330, 0, 1);
+  const alt = clamp((floorY() - plane.y) / 330, 0, 1);
   ctx.globalAlpha = 0.3 * (1 - alt * 0.85);               // shadow shrinks and fades with altitude
-  oval(PLANE_X - 6, GROUND + 15, 100 * (1 - alt * 0.5), 7 * (1 - alt * 0.5), '#0b2010');
+  oval(PLANE_X - 6, RUNWAY_Y + 3, 100 * (1 - alt * 0.5), 7 * (1 - alt * 0.5), '#0b2010');
   ctx.globalAlpha = 1;
 }
 
@@ -804,8 +967,60 @@ function drawAura() {
   }
 }
 
+// ── drawing: "catch this" and "dodge this" markers ─────────────────────────
+// Everything worth catching floats inside a pulsing green ring with twinkles on it; everything
+// dangerous has a red haze behind it and a red warning sign above it.
+const GOOD = { crate: [-9, 33], heart: [0, 24], shield: [0, 24], magnet: [0, 24] };      // ring: dy, radius
+const DANGER = {                                                   // haze: dy, radius; sign: dy, size
+  bird: [0, 27, -18, 0.8], balloon: [-6, 54, -52, 1], storm: [0, 80, -42, 1.1], jet: [0, 46, -24, 1],
+};
+
+function twinkle(x, y, r) {
+  const q = r * 0.28;
+  poly([[x, y - r], [x + q, y - q], [x + r, y], [x + q, y + q], [x, y + r], [x - q, y + q], [x - r, y], [x - q, y - q]],
+       '#ffffff');
+}
+
+function drawGoodRing(p) {
+  const [dy, r0] = GOOD[p.kind];
+  const k = 0.5 + 0.5 * Math.sin(clock * 0.14 + p.phase), r = r0 + k * 2.5, y = p.y + dy;
+  glow(p.x, y, r + 18, '80,255,140', 0.3 + 0.2 * k);
+  for (const [lw, col] of [[6.5, 'rgba(6,56,24,0.6)'], [3.2, '#6dff9a']]) {
+    ctx.lineWidth = lw; ctx.strokeStyle = col;
+    ctx.beginPath(); ctx.arc(p.x, y, r, 0, TAU); ctx.stroke();
+  }
+  for (let i = 0; i < 3; i++) {
+    const a = clock * 0.045 + p.phase + i * TAU / 3;
+    twinkle(p.x + Math.cos(a) * r, y + Math.sin(a) * r, 4.2 + 1.3 * Math.sin(clock * 0.2 + i * 2));
+  }
+  if (p.tip) text('CATCH!', p.x, y - r - 9, 14, '#8dffb0', { align: 'center', outline: 'rgba(4,40,18,0.9)' });
+}
+
+const offScreen = o => o.kind === 'jet' && o.x > W + 14;   // a jet that is still only a warning arrow
+
+function drawDangerHaze(o) {
+  if (o.scared || offScreen(o)) return;
+  const [dy, r] = DANGER[o.kind];
+  glow(o.x, o.y + dy, r, '255,40,40', 0.46 + 0.1 * Math.sin(clock * 0.2 + o.phase));
+}
+
+function drawDangerSign(o) {
+  if (o.scared || offScreen(o)) return;
+  const [, , dy, k] = DANGER[o.kind];
+  const x = o.x, y = o.y + dy + Math.sin(clock * 0.18 + o.phase) * 1.5;
+  ctx.lineWidth = 1.6; ctx.lineJoin = 'round';
+  poly([[x, y - 15 * k], [x + 9.5 * k, y + k], [x - 9.5 * k, y + k]], '#ff2d2d', '#ffffff');
+  text('!', x, y - 1.8 * k, 11.5 * k, '#ffffff', { align: 'center' });
+  if (!o.tip) return;
+  const ink = { align: 'center', outline: 'rgba(70,0,0,0.9)' };
+  if (o.kind === 'bird') text('DODGE!', x - 12, y - 2, 14, '#ff9a9a', { ...ink, align: 'right' });   // clear of the flock
+  else text('DODGE!', x, y - 15 * k - 6, 14, '#ff9a9a', ink);
+}
+
 // ── drawing: obstacles & pickups ───────────────────────────────────────────
 function drawBird(o) {
+  if (SPR.on)
+    return sprite('bird_' + [0, 1, 2, 1][Math.floor((clock + o.phase * 3) / 5) % 4], o.x, o.y, { rot: o.scared ? 0.5 : 0 });
   const flap = Math.sin(clock * 0.32 + o.phase);
   ctx.save(); ctx.translate(o.x, o.y);
   if (o.scared) ctx.rotate(0.5);
@@ -830,6 +1045,7 @@ function balloonPath() {
   ctx.bezierCurveTo(-27, -3, -27, -34, 0, -34); ctx.closePath();
 }
 function drawBalloon(o) {
+  if (SPR.on) return sprite('balloon_' + o.col, o.x, o.y, { rot: Math.sin(o.t * 0.03 + o.phase) * 0.05 });
   const cols = BALLOON_COLS[o.col];
   ctx.save(); ctx.translate(o.x, o.y); ctx.rotate(Math.sin(o.t * 0.03 + o.phase) * 0.05);
   ctx.scale(1.25, 1.25);
@@ -853,7 +1069,7 @@ function drawStorm(o) {
   const fall = GROUND - o.y - 18;
   ctx.strokeStyle = C('#bcd6f2'); ctx.lineWidth = 1.2; ctx.globalAlpha = 0.42;          // rain
   ctx.beginPath();
-  for (let i = 0; i < 18; i++) {
+  for (let i = 0; i < 18 && !o.icon; i++) {
     const ry = (clock * 7 + hash(i * 3.1 + o.seed) * 400) % fall;
     const rx = o.x - 52 + hash(i + o.seed) * 104 - ry * 0.12;
     ctx.moveTo(rx, o.y + 18 + ry); ctx.lineTo(rx - 1.2, o.y + 28 + ry);
@@ -866,12 +1082,15 @@ function drawStorm(o) {
     ctx.fillStyle = g; ctx.fillRect(o.x - 9, o.y + 14, 18, GROUND - o.y - 14);
   }
   const lit = strike || (charging && clock % 8 < 4);
-  ctx.fillStyle = C('#34384e'); puffs(STORM_PUFFS, o.x, o.y, 1, 6);
-  ctx.fillStyle = strike ? '#e3e6ff' : C(lit ? '#8f95b8' : '#5f6584'); puffs(STORM_PUFFS, o.x, o.y, 1, 0);
+  if (SPR.on) sprite(lit ? 'storm_lit' : 'storm', o.x, o.y, { glow: lit });
+  else {
+    ctx.fillStyle = C('#34384e'); puffs(STORM_PUFFS, o.x, o.y, 1, 6);
+    ctx.fillStyle = strike ? '#e3e6ff' : C(lit ? '#8f95b8' : '#5f6584'); puffs(STORM_PUFFS, o.x, o.y, 1, 0);
+  }
 
   if (strike) {
     const seed = Math.floor(clock / 3) + o.seed;
-    const pts = [[o.x, o.y + 16]];
+    const pts = [[o.x, o.y + (SPR.on ? 26 : 16)]];
     for (let y = o.y + 38, i = 1; y < GROUND; y += 22, i++) pts.push([o.x + (hash(seed + i * 7.7) - 0.5) * 26, y]);
     pts.push([o.x + (hash(seed) - 0.5) * 14, GROUND + 2]);
     ctx.lineJoin = 'miter'; ctx.lineCap = 'round';
@@ -892,6 +1111,11 @@ function drawJet(o) {
     }
     return;
   }
+  if (SPR.on) {
+    const e = SPR.meta.jet.points.exhaust;
+    glow(o.x + e[0] + 4, o.y + e[1], 13, '255,170,60', 0.6 + 0.3 * Math.sin(clock * 0.9));
+    return sprite('jet', o.x, o.y);
+  }
   ctx.save(); ctx.translate(o.x, o.y);
   glow(34, 0, 12, '255,170,60', 0.6 + 0.3 * Math.sin(clock * 0.9));
   poly([[14, -4], [23, -5], [29, -17], [21, -17]], C('#a52f3a'));
@@ -904,17 +1128,16 @@ function drawJet(o) {
 }
 
 function drawCrate(p) {
+  if (SPR.on) return sprite('crate', p.x, p.y, { rot: Math.sin(p.t * 0.05 + p.phase) * 0.12 });
   ctx.save(); ctx.translate(p.x, p.y);
-  glow(0, 0, 34, '255,220,110', 0.35);
   ctx.rotate(Math.sin(p.t * 0.05 + p.phase) * 0.12);
   ctx.strokeStyle = C('#f5f5f5'); ctx.lineWidth = 0.8;
   ctx.beginPath();
   for (const [cx, bx] of [[-19, -9], [-7, -4], [7, 4], [19, 9]]) { ctx.moveTo(cx, -25); ctx.lineTo(bx, -9); }
   ctx.stroke();
-  ctx.save();                                             // striped canopy
-  ctx.beginPath(); ctx.ellipse(0, -25, 21, 15, 0, Math.PI, TAU); ctx.closePath(); ctx.clip();
-  for (let i = 0; i < 4; i++) { ctx.fillStyle = C(i % 2 ? '#fff3e0' : '#ff7a3d'); ctx.fillRect(-21 + i * 10.5, -41, 10.6, 17); }
-  ctx.restore();
+  ctx.beginPath(); ctx.ellipse(0, -25, 21, 15, 0, Math.PI, TAU); ctx.closePath();        // plain white canopy
+  ctx.fillStyle = C('#ffffff'); ctx.fill();
+  ctx.strokeStyle = C('#c9d3df'); ctx.lineWidth = 1; ctx.stroke();
   ctx.fillStyle = C('#b9772f'); ctx.fillRect(-11, -9, 22, 20);                           // wooden crate
   ctx.strokeStyle = C('#74461a'); ctx.lineWidth = 1.6; ctx.strokeRect(-11, -9, 22, 20);
   ctx.lineWidth = 1.1;
@@ -923,12 +1146,12 @@ function drawCrate(p) {
   ctx.restore();
 }
 
-const POWER_COL = { heart: ['#ff5d73', '255,93,115'], shield: ['#39a9f5', '77,184,255'], magnet: ['#a56bff', '183,123,255'] };
+const POWER_COL = { heart: '#ff5d73', shield: '#39a9f5', magnet: '#a56bff' };
 function drawPower(p) {
-  const [col, rgb] = POWER_COL[p.kind];
+  const col = POWER_COL[p.kind];
   const s = 1 + 0.08 * Math.sin(clock * 0.12 + p.phase);
+  if (SPR.on) return sprite('power_' + p.kind, p.x, p.y, { scale: s, glow: true });
   ctx.save(); ctx.translate(p.x, p.y); ctx.scale(s, s);
-  glow(0, 0, 32, rgb, 0.55);
   const g = ctx.createRadialGradient(-4, -5, 1, 0, 0, 14);
   g.addColorStop(0, '#ffffff'); g.addColorStop(0.35, col); g.addColorStop(1, col);
   circle(0, 0, 14, g);
@@ -992,7 +1215,7 @@ function drawHUD() {
   for (const [kind, left, label] of [['shield', plane.shield, 'Shield'], ['magnet', plane.magnet, 'Magnet']]) {
     if (left <= 0) continue;
     panel(10, y, 118, 18, 9, 'rgba(6,20,48,0.5)');
-    rr(12, y + 2, 114 * left / 480, 14, 7); ctx.fillStyle = POWER_COL[kind][0]; ctx.fill();
+    rr(12, y + 2, 114 * left / 480, 14, 7); ctx.fillStyle = POWER_COL[kind]; ctx.fill();
     text(label, 20, y + 13.5, 11, '#fff');
     y += 23;
   }
@@ -1006,20 +1229,46 @@ function drawHUD() {
   }
 }
 
+// One of everything, drawn exactly as it looks in flight, sorted into "catch" and "dodge".
+const LEGEND_GOOD = [['crate', 152, 'crates'], ['heart', 216, 'repairs'], ['shield', 266, 'shields'], ['magnet', 316, 'magnets']];
+const LEGEND_BAD = [['bird', 388, 'birds'], ['balloon', 450, 'balloons'], ['storm', 550, 'storms'], ['jet', 652, 'jets']];
+
+function legendBox(x, w, title, fill, line, ink) {
+  panel(x, 122, w, 146, 10, fill, line);
+  rr(x + w / 2 - 62, 111, 124, 22, 11); ctx.fillStyle = line; ctx.fill();
+  text(title, x + w / 2, 127, 13, ink, { align: 'center' });
+}
+
+function drawLegend() {
+  legendBox(108, 242, 'CATCH THESE', 'rgba(60,220,120,0.12)', '#6dff9a', '#06361a');
+  legendBox(358, 334, 'DODGE THESE', 'rgba(255,70,70,0.12)', '#ff7b7b', '#4a0606');
+  for (const [kind, x, label] of LEGEND_GOOD) {
+    const p = { kind, x, y: kind === 'crate' ? 213 : 204, t: 0, phase: x };
+    drawGoodRing(p);
+    (kind === 'crate' ? drawCrate : drawPower)(p);
+    text(label, x, 258, 11.5, '#d9ffe6', { align: 'center', weight: 'normal' });
+  }
+  for (const [kind, x, label] of LEGEND_BAD) {
+    const o = { kind, x, y: kind === 'bird' || kind === 'jet' ? 212 : 204, t: 0, phase: 0, col: 0, seed: 1, icon: true };
+    drawDangerHaze(o);
+    ({ bird: drawBird, balloon: drawBalloon, storm: drawStorm, jet: drawJet })[kind](o);
+    drawDangerSign(o);
+    text(label, x, 258, 11.5, '#ffe0e0', { align: 'center', weight: 'normal' });
+  }
+}
+
 function drawStartScreen() {
-  panel(W / 2 - 300, 34, 600, 196, 16, 'rgba(4,22,62,0.8)', '#FFD700');
-  text("Lewis's An-225 Adventure!", W / 2, 84, 32, '#FFD700', { align: 'center', outline: '#04163e' });
-  text("Fly the world's biggest cargo plane!", W / 2, 112, 15, '#ffffff', { align: 'center', weight: 'normal' });
-  text('Hold SPACE or ↑ (or hold the screen) to climb   •   ↓ to dive', W / 2, 146, 13.5, '#aadaff',
+  panel(W / 2 - 300, 12, 600, 290, 16, 'rgba(4,22,62,0.86)', '#FFD700');
+  text("Lewis's An-225 Adventure!", W / 2, 52, 30, '#FFD700', { align: 'center', outline: '#04163e' });
+  text('Hold SPACE or ↑ (or hold the screen) to take off and climb   •   ↓ to dive', W / 2, 76, 13.5, '#aadaff',
        { align: 'center', weight: 'normal' });
-  text('Dodge birds, balloons, storms and jets — land softly or lose a heart!', W / 2, 168, 13.5, '#aadaff',
+  text('Catch crates in a row for a combo up to x5   •   Land softly or lose a heart!', W / 2, 96, 13.5, '#FFD700',
        { align: 'center', weight: 'normal' });
-  text('Catch cargo crates in a row to build a combo up to x5', W / 2, 190, 13.5, '#FFD700',
-       { align: 'center', weight: 'normal' });
+  drawLegend();
   ctx.globalAlpha = 0.65 + 0.35 * Math.sin(clock * 0.09);
-  text('Press SPACE or tap to take off!', W / 2, 217, 16, '#ffffff', { align: 'center' });
+  text('Press SPACE or tap to take off!', W / 2, 290, 16, '#ffffff', { align: 'center' });
   ctx.globalAlpha = 1;
-  if (best > 0) text('Best: ' + best, W / 2, 252, 14, '#ffffff', { align: 'center', outline: 'rgba(0,20,60,0.8)' });
+  if (best > 0) text('Best: ' + best, W / 2, 322, 14, '#ffffff', { align: 'center', outline: 'rgba(0,20,60,0.8)' });
 }
 
 function drawGameOver() {
@@ -1058,16 +1307,18 @@ function draw() {
   drawSky(env);
   drawScenery(env);
   drawPlaneExtras();
+  for (const o of obstacles) drawDangerHaze(o);
   for (const o of obstacles) if (o.kind === 'storm') drawStorm(o);
-  for (const p of pickups) (p.kind === 'crate' ? drawCrate : drawPower)(p);
+  for (const p of pickups) { drawGoodRing(p); (p.kind === 'crate' ? drawCrate : drawPower)(p); }
   for (const o of obstacles) {
     if (o.kind === 'bird') drawBird(o);
     else if (o.kind === 'balloon') drawBalloon(o);
     else if (o.kind === 'jet') drawJet(o);
   }
+  for (const o of obstacles) drawDangerSign(o);
   drawParticles(false);
   const blink = plane.invuln > 0 && state === 'playing' && clock % 10 < 5;
-  drawPlane(PLANE_X, plane.y, plane.pitch, plane.gear, blink ? 0.4 : 1);
+  drawPlane(PLANE_X, plane.y, plane.pitch, plane.gear, blink ? 0.4 : 1, plane.susp);
   drawAura();
   drawParticles(true);
   ctx.restore();

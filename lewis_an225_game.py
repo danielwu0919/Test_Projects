@@ -1,19 +1,32 @@
 """Lewis's An-225 Adventure! -- tkinter edition.
 
 Same flight physics and game rules as lewis_an225_game.html:
-hold SPACE / UP / mouse to climb, DOWN to dive, P to pause, R to restart.
+hold SPACE / UP / mouse to take off and climb, DOWN to dive, P to pause, R to restart.
+
+With Pillow installed (pip install pillow) the game uses the 3D sprites in assets/sprites,
+rendered from the Blender models; without it, it draws the same scene as vector art.
 """
+import json
 import math
+import os
 import random
 import time
 import tkinter as tk
 from types import SimpleNamespace as NS
 
+try:
+    from PIL import Image, ImageChops, ImageTk
+except ImportError:                      # no Pillow: fall back to the drawn artwork
+    Image = None
+
 # ------------------------------------------------------------------ constants
 W, H = 800, 450
 GROUND = H - 44          # y of the grass line
 PLANE_X = 190            # screen x of the plane's centre
-GEAR_DROP = 38           # wheel bottoms sit this far below the fuselage centre
+RUNWAY_Y = GROUND + 12   # where the wheels meet the grass
+GEAR_TRAVEL = 12         # how far the gear sprite slides up into the belly when retracted
+HARD_LANDING = 3         # touchdown sink rate (px/tick) that damages the hull
+PLANE_SCALE = 1.2        # the 3D An-225 is drawn a little larger than it was modelled
 STEP = 1 / 60            # fixed physics step, so the game runs the same on any PC
 LEVEL_TICKS = 1200       # 20 s per level
 MAX_HP, MAX_COMBO = 3, 5
@@ -101,7 +114,7 @@ GEAR_POD = [(48, 12)] + bezier((48, 12), (40, 23), (-40, 23), (-50, 12))
 # Hit circles per obstacle type as (dx, dy, radius) -- a touch smaller than the art.
 SHAPES = {
     'bird': [(-2, -1, 9)],
-    'balloon': [(0, -15, 25), (0, 32, 7)],
+    'balloon': [(0, -13, 25), (0, 31, 7)],
     'storm': [(-24, 4, 17), (0, -2, 22), (24, 4, 17)],
     'jet': [(-18, 0, 7), (0, 1, 8), (18, -3, 8)],
 }
@@ -109,6 +122,143 @@ CLOUD_PUFFS = [(-34, 8, 20), (-12, -6, 27), (16, -2, 24), (40, 9, 17), (4, 12, 2
 STORM_PUFFS = [(-40, 6, 20), (-18, -8, 27), (12, -10, 29), (40, 4, 21), (0, 10, 26)]
 BALLOON_COLS = [('#e84a5f', '#ffd166'), ('#2a9d8f', '#f4f1de'), ('#7b5cd6', '#ffb4a2')]
 POWER_COL = {'heart': '#ff5d73', 'shield': '#39a9f5', 'magnet': '#a56bff'}
+
+# Markers that tell good from bad at a glance.  Everything worth catching floats inside a
+# pulsing green ring; everything dangerous has a red haze behind it and a warning sign above it.
+GOOD = {'crate': (-9, 33), 'heart': (0, 24), 'shield': (0, 24), 'magnet': (0, 24)}       # ring: dy, radius
+DANGER = {'bird': (0, 27, 24, -18, 0.8), 'balloon': (-6, 46, 56, -52, 1.0),              # haze: dy, rx, ry;
+          'storm': (0, 84, 58, -42, 1.1), 'jet': (0, 48, 30, -24, 1.0)}                  # sign: dy, size
+GREEN, RED = (80, 255, 140), (255, 40, 40)
+LEGEND_GOOD = (('crate', 152, 'crates'), ('heart', 216, 'repairs'), ('shield', 266, 'shields'),
+               ('magnet', 316, 'magnets'))
+LEGEND_BAD = (('bird', 388, 'birds'), ('balloon', 450, 'balloons'), ('storm', 550, 'storms'), ('jet', 652, 'jets'))
+
+
+# Numbers the physics needs from the plane's shape.  These match the hand-drawn plane; when
+# the 3D sprites load, the same numbers come from the points exported by the Blender model.
+VECTOR_GEOM = dict(
+    caps=[((-96, -2), (94, 1), 12), ((30, -4), (-38, 26), 7)],       # fuselage and near wing: a, b, radius
+    wheels=dict(rear=-30, front=20, nose=74, drop=38),               # wheel x positions, depth below centre
+    exhaust=[(x - 18, y) for x, y in NEAR_ENG] + [(x - 15, y) for x, y in FAR_ENG],
+    lights=dict(wing=(-43, 30), tail=(-114, -19)),
+)
+
+
+class Sprites:
+    """The 3D sprites rendered from the Blender models by assets/blender/build_assets.py.
+
+    Pillow does the scaling, rotating and time-of-day tinting.  `load` returns None when
+    Pillow or the sprite folder is missing, and the game then draws its vector artwork."""
+
+    @classmethod
+    def load(cls):
+        folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'sprites')
+        if Image is None or not os.path.isfile(os.path.join(folder, 'sprites.json')):
+            return None
+        try:
+            return cls(folder)
+        except (OSError, KeyError, ValueError):
+            return None
+
+    def __init__(self, folder):
+        with open(os.path.join(folder, 'sprites.json')) as fh:
+            data = json.load(fh)
+        self.meta = data['sprites']
+        self.base = {name: Image.open(os.path.join(folder, m['file'])).convert('RGBA')
+                     for name, m in self.meta.items()}
+        self.filters = getattr(Image, 'Resampling', Image)
+        self.amb = (255, 255, 255)
+        self.sized = {}                    # (name, scale) -> resized sprite, kept for the whole run
+        self.images, self.photos = {}, {}  # tinted sprites and their Tk images, per light level
+        self.flat, self.planes = {}, {}    # the plane with its gear composited, and rotated copies
+        self.glows = {}                    # soft coloured glows behind the catch / dodge markers
+
+    def set_ambient(self, amb):
+        """amb is the time-of-day light as three 0..1 floats; a new level re-tints the sprites."""
+        rgb = tuple(int(round(v * 24) / 24 * 255) for v in amb)
+        if rgb != self.amb:
+            self.amb = rgb
+            self.images = {k: v for k, v in self.images.items() if k[3]}      # glowing sprites keep theirs
+            self.photos = {k: v for k, v in self.photos.items() if k[3]}
+            self.flat.clear()
+            self.planes.clear()
+
+    def image(self, name, scale=1.0, alpha=1.0, glow=False):
+        """Sprite at playfield size.  glow skips the tint, for things that shine by themselves."""
+        key = (name, round(scale * 50), round(alpha * 20), glow)
+        im = self.images.get(key)
+        if im is None:
+            im = self.sized.get(key[:2])
+            if im is None:
+                m = self.meta[name]
+                im = self.sized[key[:2]] = self.base[name].resize(
+                    (max(1, round(m['w'] * scale)), max(1, round(m['h'] * scale))), self.filters.LANCZOS)
+            if not glow and self.amb != (255, 255, 255):
+                im = ImageChops.multiply(im, Image.new('RGBA', im.size, self.amb + (255,)))
+            if alpha < 0.99:
+                im = im.copy()
+                im.putalpha(im.getchannel('A').point(lambda a: int(a * alpha)))
+            self.images[key] = im
+        return key, im
+
+    def photo(self, name, scale=1.0, alpha=1.0, glow=False):
+        key, im = self.image(name, scale, alpha, glow)
+        ph = self.photos.get(key)
+        if ph is None:
+            ph = self.photos[key] = ImageTk.PhotoImage(im)
+        return ph
+
+    def glow(self, rgb, rx, ry, alpha):
+        """A soft elliptical glow that fades out towards its edge, as a Tk image."""
+        key = (rgb, round(rx), round(ry), round(alpha * 12))
+        ph = self.glows.get(key)
+        if ph is None:
+            # radial_gradient runs from 0 in the middle to 255 in the corners, so the glow has
+            # to reach zero at about 180 for its edge to be an ellipse and not the image's box
+            grad = Image.radial_gradient('L').resize((key[1] * 2, key[2] * 2), self.filters.BILINEAR)
+            im = Image.new('RGBA', grad.size, rgb + (0,))
+            im.putalpha(grad.point(lambda v: max(0, 255 - v * 36 // 25) * key[3] // 12))
+            ph = self.glows[key] = ImageTk.PhotoImage(im)
+        return ph
+
+    def plane(self, pitch, gear, susp):
+        """The An-225 with its gear at the right extension, rotated about its anchor.
+        Returns (photo, ox, oy): draw its top-left corner at (anchor x - ox, anchor y - oy)."""
+        k = PLANE_SCALE
+        deg = round(-math.degrees(pitch) * 2) / 2             # half-degree steps, so copies get reused
+        off = max(0, round((1 - gear) * GEAR_TRAVEL * k + susp)) if gear > 0.02 else None
+        hit = self.planes.get((deg, off))
+        if hit:
+            return hit
+        if len(self.planes) > 300:
+            self.planes.clear()
+        flat = self.flat.get(off)
+        if flat is None:
+            m = self.meta['plane_body']
+            im = Image.new('RGBA', self.image('plane_body', k)[1].size, (0, 0, 0, 0))
+            if off is not None:                               # the gear slides up behind the belly
+                im.alpha_composite(self.image('plane_gear', k)[1], (0, 0), (0, off))
+            im.alpha_composite(self.image('plane_body', k)[1])
+            flat = self.flat[off] = (im, m['ax'] * k, m['ay'] * k)
+        im, ax, ay = flat
+        if deg:                                               # rotate, then work out where the anchor went
+            a, dx, dy = math.radians(deg), ax - im.width / 2, ay - im.height / 2
+            im = im.rotate(deg, resample=self.filters.BICUBIC, expand=True)
+            ax = im.width / 2 + dx * math.cos(a) + dy * math.sin(a)
+            ay = im.height / 2 - dx * math.sin(a) + dy * math.cos(a)
+        hit = self.planes[(deg, off)] = (ImageTk.PhotoImage(im), ax, ay)
+        return hit
+
+    def plane_geom(self):
+        k = PLANE_SCALE
+        p = {name: (x * k, y * k) for name, (x, y) in self.meta['plane_body']['points'].items()}
+        return dict(
+            caps=[(p['fuse_a'], p['fuse_b'], 11 * k), (p['wing_a'], p['wing_b'], 5.5 * k)],
+            wheels=dict(rear=p['wheel_rear'][0], front=p['wheel_front'][0], nose=p['wheel_nose'][0],
+                        drop=p['wheel_rear'][1]),
+            exhaust=[p[f'exhaust_{i}'] for i in range(6)],
+            lights=dict(wing=p['light_wing'], tail=p['light_tail']),
+        )
 
 
 def storm_striking(o):
@@ -137,10 +287,16 @@ class An225Game:
         self.obstacles, self.pickups, self.particles, self.popups = [], [], [], []
         self.spawn_t = self.crate_t = self.power_t = 0.0
         self.last_y = H / 2
-        self.shake, self.banner, self.touch_cool = 0.0, None, 0
-        self.plane = NS(y=300.0, vy=0.0, pitch=0.0, gear=0.0, invuln=0, shield=0, magnet=0, down=False)
+        self.shake, self.banner = 0.0, None
+        self.tips = {}                     # how many of each kind of thing have appeared this flight
+        self.spr = Sprites.load()                             # None -> vector artwork
+        self.geom = self.spr.plane_geom() if self.spr else VECTOR_GEOM
+        self.plane = NS(y=300.0, vy=0.0, pitch=0.0, gear=1.0, invuln=0, shield=0, magnet=0,
+                        on_ground=True, susp=0.0, susp_v=0.0, air_t=0)
+        self.plane.y = self.floor_y()
         self.clouds = sorted((NS(x=random.uniform(-60, W + 60), y=random.uniform(26, 215),
-                                 s=random.uniform(0.45, 1.25), d=random.uniform(0.15, 0.7))
+                                 s=random.uniform(0.45, 1.25), d=random.uniform(0.15, 0.7),
+                                 v=random.randint(0, 2))
                               for _ in range(7)), key=lambda c: c.d)
 
         self.amb = (1.0, 1.0, 1.0)
@@ -213,8 +369,11 @@ class An225Game:
                 self.start_game()
         elif self.state == 'paused':
             self.toggle_pause()
-        elif self.state == 'playing' and self.plane.vy > -4:
-            self.plane.vy -= 2.4                      # a tap gives a little hop
+        elif self.state == 'playing':
+            if self.plane.on_ground:
+                self.plane.pitch -= 0.03              # on the runway a tap just nudges the nose up
+            elif self.plane.vy > -2.2:
+                self.plane.vy -= 1.2                  # in the air a tap gives a little hop
 
     def toggle_pause(self):
         if self.state == 'playing':
@@ -227,13 +386,17 @@ class An225Game:
         self.state = 'playing'
         self.ticks, self.score, self.score_f, self.dist, self.level = 0, 0, 0.0, 0.0, 1
         self.hp, self.combo, self.crates = MAX_HP, 1, 0
-        self.speed, self.new_best, self.over_t = 4.0, False, 0
+        self.speed = max(self.speed, 0.6)                     # accelerate from wherever we were rolling
+        self.new_best, self.over_t = False, 0
         self.obstacles, self.pickups, self.popups = [], [], []
-        self.spawn_t, self.crate_t, self.power_t, self.last_y = 110, 140, 620, H / 2
-        self.shake, self.touch_cool = 0.0, 0
-        p = self.plane
-        p.y, p.vy, p.pitch, p.gear, p.invuln, p.shield, p.magnet, p.down = 290.0, -2.0, 0.0, 0.0, 90, 0, 0, False
+        self.spawn_t, self.crate_t, self.power_t, self.last_y = 170, 200, 620, H / 2
+        self.shake = 0.0
+        p = self.plane                                        # every flight starts with a take-off roll
+        p.vy, p.pitch, p.gear, p.invuln, p.shield, p.magnet = 0.0, 0.0, 1.0, 120, 0, 0
+        p.on_ground, p.susp, p.susp_v, p.air_t = True, 0.0, 0.0, 0
+        p.y = self.floor_y()
         self.banner = NS(title='Level 1', sub=SKY[0].name, t=150)
+        self.tips = {}
 
     def end_game(self):
         self.state, self.over_t, self.speed = 'gameover', 0, 0.0
@@ -257,7 +420,17 @@ class An225Game:
     def plane_capsules(self):
         """Collision shape: fuselage + near wing, as capsules that rotate with the plane."""
         tw = self.plane_to_world
-        return [(tw(-96, -2), tw(94, 1), 12), (tw(30, -4), tw(-38, 26), 7)]
+        return [(tw(*a), tw(*b), r) for a, b, r in self.geom['caps']]
+
+    def gear_reach(self, pitch):
+        """How far below the plane's centre its lowest wheel is: nose-up puts the rear main
+        wheels lowest, nose-down the nose wheel."""
+        w, s = self.geom['wheels'], math.sin(pitch)
+        return max(w['rear'] * s, w['front'] * s, w['nose'] * s) + w['drop'] * math.cos(pitch)
+
+    def floor_y(self):
+        """plane.y when the wheels are on the grass."""
+        return RUNWAY_Y - self.gear_reach(self.plane.pitch)
 
     @staticmethod
     def gap_to(o, caps):
@@ -286,9 +459,16 @@ class An225Game:
         self.last_y = y
         return y
 
-    def new_obstacle(self, kind, **props):
+    def want_tip(self, kind):
+        """The first two times each kind of thing appears in a flight it carries a "CATCH!" or
+        "DODGE!" label, so a new pilot learns what is what."""
+        self.tips[kind] = self.tips.get(kind, 0) + 1
+        return self.tips[kind] <= 2
+
+    def new_obstacle(self, kind, tip=True, **props):
         o = NS(kind=kind, x=W + 40.0, y=0.0, vx=0.0, t=0, min_gap=1e9, seed=random.uniform(0, 100),
-               phase=random.uniform(0, TAU), scared=False, touched=False, passed=False)
+               phase=random.uniform(0, TAU), scared=False, touched=False, passed=False, icon=False,
+               tip=tip and self.want_tip(kind))
         o.__dict__.update(props)
         self.obstacles.append(o)
 
@@ -307,18 +487,19 @@ class An225Game:
             for k in range(1, (2 if lv >= 5 else 1) + 1):     # V formation: 3 birds, later 5
                 for side in (-1, 1):
                     self.new_obstacle('bird', x=W + 40.0 + 26 * k, y=y + side * 18 * k,
-                                      base_y=y + side * 18 * k, amp=8, phase=phase, vx=vx)
+                                      base_y=y + side * 18 * k, amp=8, phase=phase, vx=vx, tip=False)
         else:
-            y = self.pick_y(60, GROUND - 45)
+            y = self.pick_y(60, GROUND - 20)                  # single birds can skim the ground too
             self.new_obstacle('bird', y=y, base_y=y, amp=random.uniform(6, 18), vx=random.uniform(0.8, 1.6))
 
-    def new_pickup(self, kind, x, y):
-        self.pickups.append(NS(kind=kind, x=float(x), y=y, base_y=y, t=0, phase=random.uniform(0, TAU)))
+    def new_pickup(self, kind, x, y, tip=True):
+        self.pickups.append(NS(kind=kind, x=float(x), y=y, base_y=y, t=0, phase=random.uniform(0, TAU),
+                               tip=tip and self.want_tip(kind)))
 
     def spawn_crates(self):
         y = random.uniform(70, GROUND - 75)
         for i in range(3 if random.random() < 0.25 else 1):   # sometimes a row of three
-            self.new_pickup('crate', W + 30 + i * 70, y)
+            self.new_pickup('crate', W + 30 + i * 70, y, i == 0)
 
     def spawn_power(self):
         kinds = ['shield', 'magnet']
@@ -351,14 +532,14 @@ class An225Game:
     def emit_exhaust(self):
         hurt = self.state in ('crashing', 'gameover')
         if self.clock % 3 == 0 and not hurt:
-            for i, (ex, ey) in enumerate(NEAR_ENG + FAR_ENG):
+            for i, (ex, ey) in enumerate(self.geom['exhaust']):
                 far = i >= 3
-                x, y = self.plane_to_world(ex - (15 if far else 18), ey)
+                x, y = self.plane_to_world(ex, ey)
                 self.emit(x, y, -self.speed * 0.55 - 1.2, random.uniform(-0.12, 0.12), 18,
                           1.6 if far else 2.2, '#ffffff', a=0.25 if far else 0.42, grow=0.22)
         # a struggling engine smokes when the hull is nearly gone
         if self.clock % 5 == 0 and (hurt or (self.hp == 1 and self.state == 'playing')):
-            x, y = self.plane_to_world(NEAR_ENG[1][0] - 14, NEAR_ENG[1][1])
+            x, y = self.plane_to_world(self.geom['exhaust'][1][0] + 4, self.geom['exhaust'][1][1])
             self.emit(x, y, -self.speed * 0.6 - 0.5, random.uniform(-0.9, -0.3), 40, 3.5, '#3a3d44',
                       a=0.7, grow=0.3, front=True)
 
@@ -385,7 +566,74 @@ class An225Game:
             self.sparkle((o.x + PLANE_X) / 2, (o.y + p.y) / 2, '#ffcf5a', 10)
         self.popup(why, PLANE_X, p.y - 46, '#ff8a8a')
         if self.hp <= 0:
-            self.state, p.down, p.shield, p.magnet = 'crashing', False, 0, 0
+            self.state, p.shield, p.magnet = 'crashing', 0, 0
+
+    # --------------------------------------------------------- flight physics
+    def fly(self):
+        """In the air: thrust, gravity and drag, an air cushion close to the ground, and a
+        flare that brings the nose up before the wheels touch."""
+        p = self.plane
+        alt = self.floor_y() - p.y
+        # A heavy aeroplane: it gathers vertical speed slowly and never gets much of it.  Held
+        # inputs settle at about 3.6 px/tick up, 2.5 down hands-off and 5 in a dive.
+        ay = 0.12                                             # gravity
+        if self.up:
+            ay -= 0.29                                        # lift while climbing
+        if self.down:
+            ay += 0.12                                        # nose-down dive
+        if alt < 50:
+            ay -= 0.05 * (1 - max(alt, 0) / 50)               # ground effect
+        if p.y < 52:
+            ay += (52 - p.y) * 0.02                           # thin air: soft ceiling
+        p.vy = clamp((p.vy + ay) * 0.955, -4.2, 5.6)          # drag gives the big plane its weight
+        p.y += p.vy
+        if p.y < 34:
+            p.y, p.vy = 34.0, max(p.vy, 0)
+
+        want = clamp(math.atan2(p.vy, 10), -0.45, 0.4)
+        want = lerp(want, min(want, -0.05), clamp(1 - alt / 70, 0, 1))        # flare
+        p.pitch += (want - p.pitch) * 0.1
+        p.gear = clamp(p.gear + (0.06 if alt < 110 else -0.04), 0, 1)
+        p.air_t += 1
+
+        fy = self.floor_y()
+        if p.y >= fy:
+            p.y = fy
+            if p.vy >= 0:
+                self.touch_down()
+
+    def touch_down(self):
+        """The wheels have met the grass.  A gentle arrival settles onto the gear, a firm one
+        skips once, and a hard one bounces and costs a heart.  Each bounce loses most of its
+        energy, so the plane always ends up rolling instead of hopping forever."""
+        p, w = self.plane, self.geom['wheels']
+        v, wx = p.vy, PLANE_X + (w['rear'] + w['front']) / 2
+        p.susp_v += min(v, 5) * 0.8                           # the landing gear soaks up the hit
+        if v > HARD_LANDING:
+            p.vy = -v * 0.38
+            self.dust(wx, RUNWAY_Y, 10, 1.5)
+            self.hit_plane(None, 'Hard landing!')
+        elif v > 1.7:
+            p.vy = -v * 0.25
+            self.dust(wx, RUNWAY_Y, 5)
+        else:
+            p.on_ground, p.vy = True, 0.0
+            self.dust(wx, RUNWAY_Y, 3, 0.6)
+            if p.air_t > 90:
+                self.popup('Smooth landing!', PLANE_X, p.y - 46, '#d9f7c9', 11)
+
+    def ground_roll(self):
+        """Rolling on the gear: the wheels stay planted and nothing bounces.  Holding climb
+        raises the nose about the main wheels (faster with more speed); once rotated, the
+        plane lifts off."""
+        p = self.plane
+        p.vy, p.air_t = 0.0, 0
+        p.gear = min(1, p.gear + 0.06)
+        rate = 0.055 * clamp(self.speed / 4, 0.4, 1) if self.up else 0.07
+        p.pitch += ((-0.17 if self.up else 0) - p.pitch) * rate
+        p.y = self.floor_y()
+        if self.up and p.pitch < -0.09:
+            p.on_ground, p.vy = False, -1.0
 
     def update_play(self):
         p = self.plane
@@ -394,53 +642,26 @@ class An225Game:
         if lv != self.level:
             self.level = lv
             self.banner = NS(title=f'Level {lv}', sub=SKY[(lv - 1) % len(SKY)].name, t=150)
-        self.speed += (min(4 + (self.level - 1) * 0.5, 9.5) - self.speed) * 0.01
-        self.dist += self.speed
-        self.score_f += self.speed / 4
-        whole = int(self.score_f)
-        self.score += whole
-        self.score_f -= whole
+        target = min(3.5 + (self.level - 1) * 0.38, 7.5)
+        self.speed += (target - self.speed) * (0.02 if self.speed < 3.6 else 0.01)    # brisk take-off roll
+        if not p.on_ground:                                   # distance and score only count while flying
+            self.dist += self.speed
+            self.score_f += self.speed / 4
+            whole = int(self.score_f)
+            self.score += whole
+            self.score_f -= whole
 
-        # -- flight physics: thrust / gravity / drag, plus a ground-effect cushion
-        floor_y = GROUND - GEAR_DROP
-        alt = floor_y - p.y
-        ay = 0.30                                             # gravity
-        if self.up:
-            ay -= 0.72                                        # lift while climbing
-        if self.down:
-            ay += 0.38                                        # nose-down dive
-        if alt < 50:
-            ay -= 0.12 * (1 - max(alt, 0) / 50)               # air cushion just above the ground
-        if p.y < 52:
-            ay += (52 - p.y) * 0.05                           # thin air: soft ceiling
-        p.vy = clamp((p.vy + ay) * 0.94, -7, 8.5)             # drag gives the big plane its weight
-        p.y += p.vy
-        if p.y < 34:
-            p.y, p.vy = 34.0, max(p.vy, 0)
-
-        p.pitch += (clamp(math.atan2(p.vy, 13), -0.45, 0.4) - p.pitch) * 0.14
-        p.gear = clamp(p.gear + (0.06 if alt < 110 else -0.04), 0, 1)
-
-        if p.y >= floor_y:                                    # wheels on the grass
-            p.y = floor_y
-            if p.vy > 3:                                      # came down hard
-                p.vy = -3.8
-                self.dust(PLANE_X, GROUND, 10, 1.5)
-                self.hit_plane(None, 'Hard landing!')
-            else:                                             # gentle touch-and-go costs nothing
-                p.vy = -max(1.8, p.vy * 0.6) - 0.8
-                self.dust(PLANE_X, GROUND, 5)
-                if self.touch_cool <= 0:
-                    self.popup('Touch and go!', PLANE_X, p.y - 46, '#d9f7c9', 11)
-                self.touch_cool = 90
-        self.touch_cool = max(0, self.touch_cool - 1)
+        if p.on_ground:
+            self.ground_roll()
+        else:
+            self.fly()
         p.invuln, p.shield, p.magnet = max(0, p.invuln - 1), max(0, p.shield - 1), max(0, p.magnet - 1)
 
         # -- spawning
         self.spawn_t -= 1
         if self.spawn_t <= 0:
             self.spawn_obstacle()
-            self.spawn_t = max(40, 104 - self.level * 8) * random.uniform(0.8, 1.25)
+            self.spawn_t = max(56, 130 - self.level * 9) * random.uniform(0.8, 1.25)
         self.crate_t -= 1
         if self.crate_t <= 0:
             self.spawn_crates()
@@ -466,8 +687,8 @@ class An225Game:
                 o.touched = True
                 self.hit_plane(o)
             if o.kind == 'storm':
-                if abs(o.x - PLANE_X) < 130:
-                    p.vy += random.uniform(-0.22, 0.22)       # turbulence
+                if abs(o.x - PLANE_X) < 130 and not p.on_ground:
+                    p.vy += random.uniform(-0.12, 0.12)       # turbulence
                 if storm_striking(o) and self.lightning_hits(o, caps):
                     o.touched = True
                     self.hit_plane(o, 'Zap!')
@@ -517,23 +738,26 @@ class An225Game:
             self.sparkle(c.x, c.y, '#d3b0ff', 10)
 
     def update_crash(self):
-        """Out of hull points: glide down for an emergency landing and roll to a stop."""
-        p, floor_y = self.plane, GROUND - GEAR_DROP
+        """Out of hull points: glide down, flare, and roll out to a stop on the gear."""
+        p = self.plane
         p.gear = min(1, p.gear + 0.06)
-        if not p.down:
-            p.vy = min(p.vy + 0.2, 5.5)
+        if not p.on_ground:
+            alt = self.floor_y() - p.y
+            p.vy = min(p.vy + 0.2, 2.4 if alt < 60 else 4.5)
             p.y += p.vy
-            p.pitch += (0.2 - p.pitch) * 0.05
-            if p.y >= floor_y:
-                p.y, p.down, p.vy, self.shake = floor_y, True, 0.0, 13
-                self.dust(PLANE_X, GROUND, 16, 1.8)
+            p.pitch += ((-0.06 if alt < 70 else 0.14) - p.pitch) * 0.06
+            if p.y >= self.floor_y():
+                p.on_ground, p.susp_v, p.vy, self.shake = True, p.susp_v + p.vy, 0.0, 9
+                self.dust(PLANE_X, RUNWAY_Y, 14, 1.6)
         else:
-            self.speed *= 0.962
-            p.pitch += (0 - p.pitch) * 0.15
+            self.speed *= 0.966
+            p.pitch += (0 - p.pitch) * 0.07
             if self.speed > 0.6 and self.clock % 4 == 0:
-                self.dust(PLANE_X - 20, GROUND, 1)
+                self.dust(PLANE_X - 20, RUNWAY_Y, 1)
             if self.speed < 0.2:
                 self.end_game()
+        if p.on_ground:
+            p.y = self.floor_y()
 
     def update_world(self):
         sp = self.speed
@@ -583,6 +807,10 @@ class An225Game:
             q.life -= 1
         self.popups = [q for q in self.popups if q.life > 0]
 
+        # landing-gear suspension: a damped spring, so touchdowns settle instead of ringing
+        p = self.plane
+        p.susp_v = (p.susp_v - p.susp * 0.2) * 0.72
+        p.susp = clamp(p.susp + p.susp_v, -1.5, 6)
         self.shake *= 0.86
         if self.banner:
             self.banner.t -= 1
@@ -595,10 +823,9 @@ class An225Game:
         self.clock += 1
         p = self.plane
         if self.state == 'start':
-            self.speed = 2.2
-            p.y = 300 + math.sin(self.clock * 0.035) * 12
-            p.pitch = math.cos(self.clock * 0.035) * 0.05
-            p.gear = 0.0
+            self.speed = 2.2                                  # taxiing, waiting for take-off
+            p.on_ground, p.gear, p.pitch, p.vy = True, 1.0, 0.0, 0.0
+            p.y = self.floor_y()
         elif self.state == 'playing':
             self.update_play()
         elif self.state == 'crashing':
@@ -694,7 +921,15 @@ class An225Game:
         pts.append((W + 20, H + 20))
         self.poly(pts, fill)
 
+    def sprite(self, name, x, y, scale=1.0, alpha=1.0, glow=False):
+        """Draw a 3D sprite with its anchor at (x, y)."""
+        m = self.spr.meta[name]
+        self.cv.create_image(x - m['ax'] * scale, y - m['ay'] * scale, anchor='nw',
+                             image=self.spr.photo(name, scale, alpha, glow))
+
     def draw_cloud(self, c):
+        if self.spr:
+            return self.sprite(f'cloud_{c.v}', c.x, c.y, c.s, 0.55 + 0.45 * c.d)
         a = 0.5 + 0.45 * c.d
         shade, white = self.fade('#c3d2e6', a, c.y), self.fade('#ffffff', a, c.y)
         for px, py, r in CLOUD_PUFFS[1:4]:
@@ -709,6 +944,14 @@ class An225Game:
             h = hash01(i)
             x, y = i * cell - self.world_x + hash01(i + 0.5) * 50, GROUND + 3
             s = 0.8 + hash01(i + 0.25) * 0.55
+            if self.spr:
+                kind = ('tree' if h < 0.32 else 'pine' if h < 0.47 else 'bush' if h < 0.57
+                        else 'house' if h < 0.63 else 'hay' if h < 0.68 else '')
+                if kind:
+                    self.sprite(kind, x, y, round(s * 20) / 20 if kind in ('tree', 'pine') else 1.0)
+                if kind == 'house' and self.env.stars > 0.3:  # windows light up at dusk
+                    self.sprite('house_glow', x, y, 1.0, clamp((self.env.stars - 0.3) * 3, 0, 1), True)
+                continue
             if h < 0.32:                                      # leafy tree
                 self.rect(x - 2 * s, y - 14 * s, 4 * s, 14 * s, C('#7a5230'))
                 self.oval(x, y - 24 * s, 14 * s, 14 * s, C('#3c9648'))
@@ -761,7 +1004,18 @@ class An225Game:
         self.draw_decor()
 
     # ----------------------------------------------------- drawing: the plane
-    def draw_plane(self, x, y, pitch, gear):
+    def draw_plane(self, x, y, pitch, gear, susp):
+        """susp is how far the body has sunk onto its landing gear; the wheels stay put."""
+        y += susp
+        if self.spr:
+            photo, ox, oy = self.spr.plane(pitch, gear, susp)
+            self.cv.create_image(x - ox, y - oy, anchor='nw', image=photo)
+            lights = self.geom['lights']
+            for point, period, on, col in ((lights['wing'], 64, 7, '#ff4040'), (lights['tail'], 90, 5, '#ffffff')):
+                if self.clock % period < on:
+                    lx, ly = self.plane_to_world(*point)
+                    self.oval(lx, ly + susp, 3, 3, col)
+            return
         C = self.C
         c, s = math.cos(pitch), math.sin(pitch)
 
@@ -795,7 +1049,7 @@ class An225Game:
             nacelle(ex, ey, 0.82, True)
 
         if gear > 0.02:                                       # landing gear swings down near the ground
-            wy = 19.5 + 14 * gear
+            wy = 19.5 + 14 * gear - susp
             strut = C('#5d646c')
             self.line([tp(74, 12), tp(74, wy)], strut, 2.2)
             for sx in (-25, -5, 15):
@@ -842,8 +1096,61 @@ class An225Game:
             self.oval(PLANE_X - 4, p.y - 4, 132 * pulse, 64 * pulse, '', '#bfeaff', 2.5)
             self.oval(PLANE_X - 4, p.y - 4, 127 * pulse, 60 * pulse, '', self.fade('#78c8ff', 0.6, p.y, False), 1.5)
 
+    # ------------------------------------------ drawing: catch / dodge markers
+    def haze(self, x, y, rx, ry, rgb, alpha, bg=None):
+        """A soft coloured glow: a real gradient with Pillow, two flat ovals without it."""
+        if self.spr:
+            self.cv.create_image(x, y, image=self.spr.glow(rgb, rx, ry, alpha))
+        else:
+            back = bg or self.backdrop(y)
+            for size, a in ((0.8, 0.4), (0.5, 0.75)):
+                self.oval(x, y, rx * size, ry * size, css(mix3(back, rgb, alpha * a)))
+
+    def draw_good_ring(self, c, bg=None):
+        dy, r0 = GOOD[c.kind]
+        k = 0.5 + 0.5 * math.sin(self.clock * 0.14 + c.phase)
+        r, x, y = r0 + k * 2.5, c.x, c.y + dy
+        self.haze(x, y, r0 + 19, r0 + 19, GREEN, 0.3 + 0.2 * k, bg)
+        self.oval(x, y, r, r, '', '#0b4a22', 6.5)
+        self.oval(x, y, r, r, '', '#6dff9a', 3)
+        for i in range(3):                                    # twinkles riding round the ring
+            a = self.clock * 0.045 + c.phase + i * TAU / 3
+            tx, ty = x + math.cos(a) * r, y + math.sin(a) * r
+            s = 4.2 + 1.3 * math.sin(self.clock * 0.2 + i * 2)
+            q = s * 0.28
+            self.poly([(tx, ty - s), (tx + q, ty - q), (tx + s, ty), (tx + q, ty + q), (tx, ty + s),
+                       (tx - q, ty + q), (tx - s, ty), (tx - q, ty - q)], '#ffffff')
+        if c.tip:
+            self.text('CATCH!', x, y - r - 14, 14, '#8dffb0', shadow='#04280f')
+
+    @staticmethod
+    def unmarked(o):
+        """Birds that are fleeing, and jets that are still only a warning arrow, carry no marker."""
+        return o.scared or (o.kind == 'jet' and o.x > W + 14)
+
+    def draw_danger_haze(self, o, bg=None):
+        if self.unmarked(o):
+            return
+        dy, rx, ry = DANGER[o.kind][:3]
+        self.haze(o.x, o.y + dy, rx, ry, RED, 0.46 + 0.1 * math.sin(self.clock * 0.2 + o.phase), bg)
+
+    def draw_danger_sign(self, o):
+        if self.unmarked(o):
+            return
+        dy, k = DANGER[o.kind][3:]
+        x, y = o.x, o.y + dy + math.sin(self.clock * 0.18 + o.phase) * 1.5
+        self.poly([(x, y - 15 * k), (x + 9.5 * k, y + k), (x - 9.5 * k, y + k)], '#ff2d2d', '#ffffff', 1.5)
+        self.text('!', x, y - 5.2 * k, 11.5 * k, '#ffffff')
+        if o.tip and o.kind == 'bird':                        # beside the sign, clear of the flock
+            self.text('DODGE!', x - 12, y - 7, 14, '#ff9a9a', 'e', shadow='#460000')
+        elif o.tip:
+            self.text('DODGE!', x, y - 15 * k - 12, 14, '#ff9a9a', shadow='#460000')
+
     # --------------------------------------------- drawing: obstacles/pickups
     def draw_bird(self, o):
+        if self.spr:
+            frame = (0, 1, 2, 1)[int((self.clock + o.phase * 3) / 5) % 4]
+            return self.sprite(f'bird_{frame}', o.x, o.y)
         C, x, y = self.C, o.x, o.y
         flap = math.sin(self.clock * 0.32 + o.phase)
         self.poly([(x - 3, y - 2), (x + 5, y - 3 - 11 * flap), (x + 12, y - 2 - 9 * flap), (x + 5, y + 1)],
@@ -858,6 +1165,8 @@ class An225Game:
                    (x + 8, y - 1 - 3 * flap), (x + 5, y + 1)], C('#5d6573'))                     # near wing
 
     def draw_balloon(self, o):
+        if self.spr:
+            return self.sprite(f'balloon_{o.col}', o.x, o.y)
         C, x, y = self.C, o.x, o.y
         a, b = BALLOON_COLS[o.col]
         self.line([(x - 8, y + 14), (x - 6, y + 28)], C('#5a4632'))
@@ -872,21 +1181,24 @@ class An225Game:
         strike, charging = storm_striking(o), storm_charging(o)
         fall = GROUND - y - 18
         rain = self.fade('#bcd6f2', 0.5, (y + GROUND) / 2)
-        for i in range(12):
+        for i in range(0 if o.icon else 12):
             ry = (self.clock * 7 + hash01(i * 3.1 + o.seed) * 400) % fall
             rx = x - 52 + hash01(i + o.seed) * 104 - ry * 0.12
             self.line([(rx, y + 18 + ry), (rx - 1.2, y + 28 + ry)], rain, 1.2)
         if charging:                                          # warning column before the bolt
             self.line([(x, y + 14), (x, GROUND)], '#ffe86a', 3, dash=(6, 6))
         lit = strike or (charging and self.clock % 8 < 4)
-        for px, py, r in STORM_PUFFS[:4]:
-            self.oval(x + px, y + py + 6, r, r, C('#34384e'))
-        top = '#e3e6ff' if strike else C('#8f95b8' if lit else '#5f6584')
-        for px, py, r in STORM_PUFFS:
-            self.oval(x + px, y + py, r, r, top)
+        if self.spr:
+            self.sprite('storm_lit' if lit else 'storm', x, y, glow=lit)
+        else:
+            for px, py, r in STORM_PUFFS[:4]:
+                self.oval(x + px, y + py + 6, r, r, C('#34384e'))
+            top = '#e3e6ff' if strike else C('#8f95b8' if lit else '#5f6584')
+            for px, py, r in STORM_PUFFS:
+                self.oval(x + px, y + py, r, r, top)
         if strike:
             seed = self.clock // 3 + o.seed
-            pts, yy, i = [(x, y + 16)], y + 38, 1
+            pts, yy, i = [(x, y + (26 if self.spr else 16))], y + 38, 1
             while yy < GROUND:
                 pts.append((x + (hash01(seed + i * 7.7) - 0.5) * 26, yy))
                 yy += 22
@@ -904,6 +1216,8 @@ class An225Game:
                 self.text('!', W - 25, y, 17, '#ffffff')
             return
         self.oval(x + 32, y, 6 + 2 * math.sin(self.clock * 0.9), 4, '#ffb347')
+        if self.spr:
+            return self.sprite('jet', x, y)
         self.poly([(x + 14, y - 4), (x + 23, y - 5), (x + 29, y - 17), (x + 21, y - 17)], C('#a52f3a'))
         self.line([(x - 18, y), (x + 20, y)], C('#dc4753'), 12, 'round')
         self.poly([(x - 22, y - 5.5), (x - 36, y + 0.5), (x - 22, y + 5.5)], C('#f3f5f7'))
@@ -911,12 +1225,13 @@ class An225Game:
         self.poly([(x - 4, y + 2), (x + 11, y + 2), (x + 20, y + 13), (x + 9, y + 13)], C('#a52f3a'))
 
     def draw_crate(self, c):
+        if self.spr:
+            return self.sprite('crate', c.x, c.y)
         C, x, y = self.C, c.x, c.y
         for cx, bx in ((-19, -9), (-7, -4), (7, 4), (19, 9)):
             self.line([(x + cx, y - 25), (x + bx, y - 9)], C('#f5f5f5'))
-        for rx, col in ((21, '#ff7a3d'), (10.5, '#fff3e0')):  # striped canopy
-            self.cv.create_arc(x - rx, y - 40, x + rx, y - 10, start=0, extent=180, style='chord',
-                               fill=C(col), outline='')
+        self.cv.create_arc(x - 21, y - 40, x + 21, y - 10, start=0, extent=180, style='chord',
+                           fill=C('#ffffff'), outline=C('#c9d3df'))                              # plain white canopy
         self.rect(x - 11, y - 9, 22, 20, C('#b9772f'), C('#74461a'), 2)                          # wooden crate
         self.line([(x - 11, y - 9), (x + 11, y + 11)], C('#74461a'))
         self.line([(x + 11, y - 9), (x - 11, y + 11)], C('#74461a'))
@@ -925,7 +1240,8 @@ class An225Game:
     def draw_power(self, c):
         x, y, col = c.x, c.y, POWER_COL[c.kind]
         r = 14 * (1 + 0.08 * math.sin(self.clock * 0.12 + c.phase))
-        self.oval(x, y, r + 5, r + 5, self.fade(col, 0.4, y, False))
+        if self.spr:
+            return self.sprite('power_' + c.kind, x, y, round(r / 14 * 25) / 25, glow=True)
         self.oval(x, y, r, r, col, '#ffffff', 2)
         if c.kind == 'heart':
             self.heart(x, y + 0.5, 6.2, '#ffffff')
@@ -968,20 +1284,42 @@ class An225Game:
             self.text(self.banner.title, W / 2, 96, 34, '#FFD700', shadow='#04163e')
             self.text(self.banner.sub, W / 2, 124, 16, '#ffffff', shadow='#04163e')
 
+    def draw_legend(self):
+        """One of everything, drawn exactly as it looks in flight, sorted into catch and dodge."""
+        good_bg, bad_bg = hex_rgb('#103557'), hex_rgb('#232652')
+        boxes = ((108, 242, 'CATCH THESE', '#103557', '#6dff9a', '#06361a'),
+                 (358, 334, 'DODGE THESE', '#232652', '#ff7b7b', '#4a0606'))
+        for x, w, _title, fill, line, _ink in boxes:
+            self.rect(x, 122, w, 146, fill, line, 2)
+        for kind, x, label in LEGEND_GOOD:
+            c = NS(kind=kind, x=x, y=213 if kind == 'crate' else 204, t=0, phase=float(x), tip=False)
+            self.draw_good_ring(c, good_bg)
+            (self.draw_crate if kind == 'crate' else self.draw_power)(c)
+            self.text(label, x, 254, 11, '#d9ffe6', style='normal')
+        for kind, x, label in LEGEND_BAD:
+            o = NS(kind=kind, x=x, y=212 if kind in ('bird', 'jet') else 204, t=0, phase=0.0, col=0, seed=1,
+                   scared=False, tip=False, icon=True)
+            self.draw_danger_haze(o, bad_bg)
+            getattr(self, 'draw_' + kind)(o)
+            self.draw_danger_sign(o)
+            self.text(label, x, 254, 11, '#ffe0e0', style='normal')
+        for x, w, title, _fill, line, ink in boxes:           # the title tabs go on last, over any glow
+            self.rect(x + w / 2 - 62, 111, 124, 22, line)
+            self.text(title, x + w / 2, 122, 13, ink)
+
     def draw_start_screen(self):
         cx = W / 2
-        self.rect(cx - 300, 34, 600, 196, '#0b2253', '#FFD700', 3)
-        self.text("Lewis's An-225 Adventure!", cx, 72, 32, '#FFD700', shadow='#04163e')
-        self.text("Fly the world's biggest cargo plane!", cx, 106, 15, '#ffffff', style='normal')
-        self.text('Hold SPACE or UP (or hold the mouse) to climb   -   DOWN to dive', cx, 140, 13, '#aadaff',
-                  style='normal')
-        self.text('Dodge birds, balloons, storms and jets -- land softly or lose a heart!', cx, 162, 13,
+        self.rect(cx - 300, 12, 600, 290, '#0b2253', '#FFD700', 3)
+        self.text("Lewis's An-225 Adventure!", cx, 42, 30, '#FFD700', shadow='#04163e')
+        self.text('Hold SPACE or UP (or hold the mouse) to take off and climb   -   DOWN to dive', cx, 71, 13,
                   '#aadaff', style='normal')
-        self.text('Catch cargo crates in a row to build a combo up to x5', cx, 184, 13, '#FFD700', style='normal')
+        self.text('Catch crates in a row for a combo up to x5   -   Land softly or lose a heart!', cx, 91, 13,
+                  '#FFD700', style='normal')
+        self.draw_legend()
         if self.clock % 60 < 42:
-            self.text('Press SPACE or click to take off!', cx, 211, 16, '#ffffff')
+            self.text('Press SPACE or click to take off!', cx, 285, 16, '#ffffff')
         if self.best:
-            self.text(f'Best: {self.best}', cx, 248, 14, '#ffffff', shadow='#04163e')
+            self.text(f'Best: {self.best}', cx, 318, 14, '#ffffff', shadow='#04163e')
 
     def draw_game_over(self):
         cx, cy = W / 2, H / 2 - 16
@@ -1007,16 +1345,21 @@ class An225Game:
         if amb != self.amb:
             self.amb = amb
             self._tint.clear()
+        if self.spr:
+            self.spr.set_ambient(amb)
 
         self.draw_sky()
         self.draw_scenery()
-        alt = clamp((GROUND - GEAR_DROP - p.y) / 330, 0, 1)   # shadow shrinks with altitude
-        self.oval(PLANE_X - 6, GROUND + 15, 100 * (1 - alt * 0.5), 7 * (1 - alt * 0.5),
-                  self.fade('#0b2010', 0.38 * (1 - alt * 0.8), GROUND + 15))
+        alt = clamp((self.floor_y() - p.y) / 330, 0, 1)       # shadow shrinks with altitude
+        self.oval(PLANE_X - 6, RUNWAY_Y + 3, 100 * (1 - alt * 0.5), 7 * (1 - alt * 0.5),
+                  self.fade('#0b2010', 0.38 * (1 - alt * 0.8), RUNWAY_Y + 3))
+        for o in self.obstacles:
+            self.draw_danger_haze(o)
         for o in self.obstacles:
             if o.kind == 'storm':
                 self.draw_storm(o)
         for c in self.pickups:
+            self.draw_good_ring(c)
             (self.draw_crate if c.kind == 'crate' else self.draw_power)(c)
         for o in self.obstacles:
             if o.kind == 'bird':
@@ -1025,9 +1368,11 @@ class An225Game:
                 self.draw_balloon(o)
             elif o.kind == 'jet':
                 self.draw_jet(o)
+        for o in self.obstacles:
+            self.draw_danger_sign(o)
         self.draw_particles(False)
         if not (p.invuln > 0 and self.state == 'playing' and self.clock % 10 < 3):   # blink while invulnerable
-            self.draw_plane(PLANE_X, p.y, p.pitch, p.gear)
+            self.draw_plane(PLANE_X, p.y, p.pitch, p.gear, p.susp)
         self.draw_aura()
         self.draw_particles(True)
         if self.shake > 0.5:                                  # screen shake moves the world, not the HUD
